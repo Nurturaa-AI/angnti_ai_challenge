@@ -1,0 +1,16 @@
+{
+  "name": "@repo-arch/evaluation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Evaluation harness: runs a system against evaluation cases and writes JSON + Markdown results.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@repo-arch/baseline": "workspace:*",
+    "@repo-arch/evaluator": "workspace:*",
+    "@repo-arch/shared": "workspace:*",
+    "zod": "^4.5.4"
+  }
+}

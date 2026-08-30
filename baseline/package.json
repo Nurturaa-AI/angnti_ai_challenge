@@ -1,0 +1,14 @@
+{
+  "name": "@repo-arch/baseline",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Baseline system: shallow repository context in, single-shot structured briefing out. No git history, no test execution, no verification.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@repo-arch/shared": "workspace:*",
+    "zod": "^4.5.4"
+  }
+}

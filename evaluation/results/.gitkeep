@@ -1,0 +1,2 @@
+# Evaluation reports land here: <run-id>.json, <run-id>.md, and the stable
+# latest-<system>.{json,md} pair. Written by `pnpm evaluate:baseline`. Contents are gitignored.

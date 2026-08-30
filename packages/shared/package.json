@@ -1,0 +1,14 @@
+{
+  "name": "@repo-arch/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Schemas, repository context collection, evidence grounding and LLM client shared by every Repo Archaeologist system.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@google/genai": "^2.19.0",
+    "zod": "^4.5.4"
+  }
+}

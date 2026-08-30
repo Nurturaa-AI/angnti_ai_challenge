@@ -1,0 +1,14 @@
+{
+  "name": "@repo-arch/evaluator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Deterministic scoring of analysis results against evaluation cases.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@repo-arch/shared": "workspace:*",
+    "zod": "^4.5.4"
+  }
+}

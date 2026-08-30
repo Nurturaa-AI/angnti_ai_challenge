@@ -1,0 +1,2 @@
+# Baseline briefings land here: <run-id>.md and <run-id>.json.
+# Written by `pnpm repo:baseline -- <path>`. Contents are gitignored.

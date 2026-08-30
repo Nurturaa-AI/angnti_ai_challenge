@@ -1,0 +1,15 @@
+{
+  "name": "@repo-arch/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Command line entry point for Repo Archaeologist.",
+  "bin": {
+    "repo-arch": "./src/index.ts"
+  },
+  "dependencies": {
+    "@repo-arch/baseline": "workspace:*",
+    "@repo-arch/evaluation": "workspace:*",
+    "@repo-arch/shared": "workspace:*"
+  }
+}

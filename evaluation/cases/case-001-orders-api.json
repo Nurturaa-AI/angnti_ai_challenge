@@ -1,0 +1,78 @@
+{
+  "id": "case-001-orders-api",
+  "title": "orders-api — write-side HTTP service for customer orders",
+  "repository": "fixtures/orders-api",
+  "notes": "Mixed by design. q2, q3, q4, q6 and q7 are answerable and citable from the readme and the manifest alone, so a competent shallow system can score on them. q5 is documented nowhere but the code: any system that answers it from shallow context is guessing, and can at best earn existence-level credit from the directory listing. The gap between those two groups is the headroom the advanced agent has to close.",
+  "questions": [
+    {
+      "id": "q1-purpose",
+      "question": "What does this service do, and is it on the read side or the write side of the ordering system?",
+      "field": "summary",
+      "expectedAnswer": "It is the write side: it accepts customer orders over HTTP, validates, prices and reserves them, and publishes an order.created event. Reads are served by a separate reporting service.",
+      "expectedKeywords": ["order"],
+      "anyOfKeywords": [["write"], ["accept"], ["publish"]],
+      "mustNotContain": ["graphql", "reporting service in this repository"],
+      "expectedEvidence": ["README.md"]
+    },
+    {
+      "id": "q2-http-framework",
+      "question": "Which HTTP framework does the service use?",
+      "field": "dependencies",
+      "expectedAnswer": "Express (declared as a runtime dependency in package.json).",
+      "expectedKeywords": ["express"],
+      "anyOfKeywords": [],
+      "mustNotContain": ["fastify", "koa", "nestjs"],
+      "expectedEvidence": ["package.json"]
+    },
+    {
+      "id": "q3-event-publication",
+      "question": "How does the service tell other systems that an order was created?",
+      "field": "any",
+      "expectedAnswer": "It publishes an order.created event to Kafka, via the kafkajs producer in src/lib/events.js.",
+      "expectedKeywords": ["order.created"],
+      "anyOfKeywords": [["kafka"]],
+      "mustNotContain": ["rabbitmq", "sns", "webhook"],
+      "expectedEvidence": ["README.md", "package.json"]
+    },
+    {
+      "id": "q4-auth-boundary",
+      "question": "Which routes require authentication, and which are exempt?",
+      "field": "any",
+      "expectedAnswer": "Every route except /health requires a bearer JWT, verified in src/middleware/auth.js against JWT_SECRET.",
+      "expectedKeywords": ["health"],
+      "anyOfKeywords": [["jwt"], ["bearer"]],
+      "mustNotContain": ["oauth", "session cookie", "api key header"],
+      "expectedEvidence": ["README.md"]
+    },
+    {
+      "id": "q5-oversell-guard",
+      "question": "What stops two concurrent orders from overselling the same SKU?",
+      "field": "any",
+      "expectedAnswer": "reserveInventory runs inside a transaction and locks the inventory row with SELECT available ... FOR UPDATE before decrementing it. Nothing in the readme or the manifest says so; it is only visible in src/services/inventory.js and the incident note in docs/incidents/.",
+      "expectedKeywords": ["for update"],
+      "anyOfKeywords": [],
+      "mustNotContain": ["optimistic locking", "redis lock"],
+      "expectedEvidence": ["src/services/inventory.js", "docs/incidents/2025-08-oversell.md"]
+    },
+    {
+      "id": "q6-testing-gap",
+      "question": "What is the largest gap in this repository's test coverage?",
+      "field": "testing",
+      "expectedAnswer": "There are no integration tests: the Postgres and Kafka clients are never exercised, so src/lib/db.js and src/lib/events.js are untested.",
+      "expectedKeywords": [],
+      "anyOfKeywords": [["integration"], ["postgres"], ["kafka"]],
+      "mustNotContain": ["full end-to-end coverage", "100% coverage"],
+      "expectedEvidence": ["README.md"]
+    },
+    {
+      "id": "q7-api-surface",
+      "question": "What kind of API does the service expose?",
+      "field": "any",
+      "expectedAnswer": "A JSON HTTP API built on Express, with POST /orders as the only write path and GET /health as a public probe.",
+      "expectedKeywords": [],
+      "anyOfKeywords": [["http"], ["rest"], ["express"]],
+      "mustNotContain": ["graphql", "grpc", "soap", "websocket"],
+      "expectedEvidence": ["README.md", "package.json"]
+    }
+  ]
+}

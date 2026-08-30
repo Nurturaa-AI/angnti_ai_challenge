@@ -1,0 +1,2 @@
+# One file per run, recording what the system did step by step.
+# Written by both `pnpm repo:baseline` and `pnpm evaluate:baseline`. Contents are gitignored.

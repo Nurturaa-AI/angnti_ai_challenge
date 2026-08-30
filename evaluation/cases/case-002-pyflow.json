@@ -1,0 +1,78 @@
+{
+  "id": "case-002-pyflow",
+  "title": "pyflow — command line ETL runner with a SQLite state store",
+  "repository": "fixtures/pyflow",
+  "notes": "A second language and a second manifest format, so the harness is not measuring a JavaScript-and-package.json special case. q6 is the headroom question here: the step type -> implementation mapping lives only in pyflow/steps/__init__.py and is not described anywhere a shallow system can read.",
+  "questions": [
+    {
+      "id": "q1-purpose",
+      "question": "What is pyflow, and how is it invoked?",
+      "field": "summary",
+      "expectedAnswer": "A command line ETL runner. `pyflow run pipeline.yaml` loads a pipeline definition, orders the steps, and executes them.",
+      "expectedKeywords": ["pipeline"],
+      "anyOfKeywords": [["command line"], ["cli"], ["etl"]],
+      "mustNotContain": ["web service", "http server", "django"],
+      "expectedEvidence": ["README.md"]
+    },
+    {
+      "id": "q2-cli-library",
+      "question": "Which library provides the command line interface?",
+      "field": "dependencies",
+      "expectedAnswer": "Click, declared in pyproject.toml as a runtime dependency.",
+      "expectedKeywords": ["click"],
+      "anyOfKeywords": [],
+      "mustNotContain": ["argparse", "typer", "fire"],
+      "expectedEvidence": ["pyproject.toml"]
+    },
+    {
+      "id": "q3-execution-order",
+      "question": "In what order do steps run, and what happens if the pipeline contains a cycle?",
+      "field": "any",
+      "expectedAnswer": "Steps are topologically sorted by their `needs` lists and run in dependency order. A cycle raises PipelineError before any step executes.",
+      "expectedKeywords": ["topological"],
+      "anyOfKeywords": [["cycle"]],
+      "mustNotContain": ["alphabetical order", "parallel"],
+      "expectedEvidence": ["README.md"]
+    },
+    {
+      "id": "q4-state-store",
+      "question": "Where does pyflow record what happened during a run?",
+      "field": "any",
+      "expectedAnswer": "One row per step attempt in a local SQLite database (.pyflow/state.db), written through SQLAlchemy in pyflow/store.py.",
+      "expectedKeywords": ["sqlite"],
+      "anyOfKeywords": [["state.db"], ["store.py"], ["sqlalchemy"]],
+      "mustNotContain": ["postgres", "redis", "s3"],
+      "expectedEvidence": ["README.md", "pyproject.toml"]
+    },
+    {
+      "id": "q5-untested-steps",
+      "question": "Which parts of the step implementations are not covered by tests?",
+      "field": "testing",
+      "expectedAnswer": "Only the transform step is tested. extract and load touch the filesystem and the database and are not covered.",
+      "expectedKeywords": ["extract"],
+      "anyOfKeywords": [["load"], ["not covered"], ["uncovered"]],
+      "mustNotContain": ["fully covered", "100% coverage"],
+      "expectedEvidence": ["README.md"]
+    },
+    {
+      "id": "q6-step-dispatch",
+      "question": "How is a step's declared type mapped to the function that runs it?",
+      "field": "any",
+      "expectedAnswer": "pyflow/steps/__init__.py defines a REGISTRY dict mapping the type strings extract/transform/load to their functions; cli.py looks the handler up in it and raises a ClickException for an unknown type.",
+      "expectedKeywords": ["registry"],
+      "anyOfKeywords": [],
+      "mustNotContain": ["entry point plugin", "importlib.metadata"],
+      "expectedEvidence": ["pyflow/steps/__init__.py", "pyflow/cli.py"]
+    },
+    {
+      "id": "q7-no-external-scheduler",
+      "question": "Does pyflow rely on an external scheduler or task queue?",
+      "field": "any",
+      "expectedAnswer": "No. Steps run in a single process, one at a time. There is no scheduler, no retry policy, and no distributed execution.",
+      "expectedKeywords": [],
+      "anyOfKeywords": [["no scheduler"], ["single process"], ["one at a time"], ["sequential"]],
+      "mustNotContain": ["celery", "airflow", "kubernetes", "cron daemon"],
+      "expectedEvidence": ["README.md"]
+    }
+  ]
+}
