@@ -55,6 +55,8 @@ FLAGS
   --seed <n>             Sampling seed. The Interactions API takes a seed, not a temperature.
   --thinking <level>     low | medium | high.
   --max-output <n>       Output token ceiling.
+  --focus "<question>"   Aim the evidence scout's search at a question (advanced only).
+                         Rejected by "evaluate": a system must not see the questions it is scored on.
   --out <dir>            Where to write output (analysis: reports/, evaluate: evaluation/results/).
   --cases <dir>          Case directory for evaluate (default: ${DEFAULT_CASES_DIR}).
   --case <id>            Evaluate only this case id. Repeatable.
@@ -72,6 +74,11 @@ EXPLORATION BUDGET (advanced only; each also settable from the environment)
   --max-list-entries <n>   Entries returned by one list_directory call.
   --max-list-depth <n>     Depth walked by one list_directory call.
 
+EVIDENCE SCOUT BUDGET (advanced only; separate from the model's tool budget above)
+  --max-scout-terms <n>    Search terms extracted before the model's first turn.
+  --max-scout-searches <n> search_code calls the scout may make. Cheap: no tokens, a filesystem walk.
+  --max-scout-files <n>    Files the scout may read. Expensive: each one enters every later prompt.
+
 ENVIRONMENT
   GEMINI_API_KEY         Required unless --mock. Copy .env.example to .env.
                          The key is never printed and never written to any output file.
@@ -87,6 +94,7 @@ interface ParsedArgs {
   caseIds: string[];
   system: string | undefined;
   caseDelaySeconds: number | undefined;
+  focus: string | undefined;
   quiet: boolean;
   help: boolean;
 }
@@ -102,6 +110,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     caseIds: [],
     system: undefined,
     caseDelaySeconds: undefined,
+    focus: undefined,
     quiet: false,
     help: false,
   };
@@ -170,6 +179,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       case "--case-delay":
         parsed.caseDelaySeconds = requireNumber("--case-delay", argv[++index]);
         break;
+      case "--focus":
+        parsed.focus = requireValue("--focus", argv[++index]);
+        break;
       case "--max-tool-calls":
         parsed.budget.maxToolCalls = requireNumber("--max-tool-calls", argv[++index]);
         break;
@@ -190,6 +202,15 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         break;
       case "--max-list-depth":
         parsed.budget.maxListDepth = requireNumber("--max-list-depth", argv[++index]);
+        break;
+      case "--max-scout-terms":
+        parsed.budget.maxScoutTerms = requireNumber("--max-scout-terms", argv[++index]);
+        break;
+      case "--max-scout-searches":
+        parsed.budget.maxScoutSearches = requireNumber("--max-scout-searches", argv[++index]);
+        break;
+      case "--max-scout-files":
+        parsed.budget.maxScoutFiles = requireNumber("--max-scout-files", argv[++index]);
         break;
       default:
         if (argument.startsWith("-")) {
@@ -212,6 +233,21 @@ async function main(argv: readonly string[]): Promise<number> {
   }
 
   loadDotEnv();
+
+  // `--focus` aims the evidence scout at a question, which only the advanced system
+  // has. Refused elsewhere rather than ignored — and the refusal on `evaluate` is the
+  // point: a system that could see the questions it is scored on would be measuring
+  // the answer key, and the baseline it is compared against answers blind.
+  if (args.focus !== undefined && args.command !== ADVANCED_SYSTEM_NAME) {
+    throw new ConfigError(
+      `--focus is only available to the "${ADVANCED_SYSTEM_NAME}" command, not "${args.command}".`,
+      args.command === "evaluate"
+        ? "Evaluation deliberately withholds the questions from both systems, so that the comparison " +
+          "measures repository understanding rather than question-answering. Use " +
+          `"pnpm repo:${ADVANCED_SYSTEM_NAME} -- <path> --focus ..." to scout for a specific question.`
+        : `The baseline makes one call over shallow context and does not search. Try "repo-arch ${ADVANCED_SYSTEM_NAME}".`,
+    );
+  }
 
   switch (args.command) {
     case "baseline":
@@ -245,9 +281,11 @@ async function commandAnalyze(args: ParsedArgs, system: string): Promise<number>
     const budget = loadExplorationBudget(args.budget);
     process.stderr.write(
       `advanced: ${repositoryPath} via ${config.provider}/${config.model}, ` +
-        `budget ${budget.maxToolCalls} calls / ${budget.maxTurns} turns\n`,
+        `budget ${budget.maxToolCalls} calls / ${budget.maxTurns} turns, ` +
+        `scout ${budget.maxScoutSearches} searches / ${budget.maxScoutFiles} reads` +
+        `${args.focus === undefined ? "" : `, focus "${args.focus}"`}\n`,
     );
-    record = await runAdvanced({ repositoryPath, config, budget });
+    record = await runAdvanced({ repositoryPath, config, budget, focus: args.focus });
   } else {
     process.stderr.write(`baseline: ${repositoryPath} via ${config.provider}/${config.model}\n`);
     record = await runBaseline({ repositoryPath, config });
@@ -283,8 +321,15 @@ async function commandAnalyze(args: ParsedArgs, system: string): Promise<number>
       ...(exploration === undefined
         ? []
         : [
-            `exploration:${exploration.toolCalls} tool call(s) over ${exploration.turns} turn(s), ` +
-              `${exploration.failedToolCalls} failed, ${exploration.filesRead.length} file(s) read, ` +
+            ...(exploration.scout === undefined
+              ? []
+              : [
+                  `scout:      ${exploration.scout.searchesWithMatches}/${exploration.scout.searches} search(es) hit, ` +
+                    `${exploration.scout.candidates} candidate(s) ranked, ` +
+                    `${exploration.scout.filesRead} read (${exploration.scout.bytesRead} bytes)`,
+                ]),
+            `exploration:${exploration.toolCalls} model tool call(s) over ${exploration.turns} turn(s), ` +
+              `${exploration.failedToolCalls} failed, ${exploration.filesRead.length} file(s) read in total, ` +
               `${exploration.bytesFromTools} byte(s) collected` +
               `${exploration.budgetExhausted ? ", budget exhausted" : ""}`,
           ]),

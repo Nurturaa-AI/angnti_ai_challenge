@@ -152,44 +152,111 @@ function recordEntry(entry: string, stack: string[], candidates: string[]): void
 /**
  * Builds a briefing from the exploration transcript.
  *
- * The excerpt is taken from a `read_file` result with the line-number gutter
- * stripped, which is exactly what a real model does when it quotes code — and it
- * is what the evidence ledger can verify, because the ledger holds the raw slice.
+ * Two kinds of file evidence are cited, because there are two ways a file reaches
+ * the ledger and both need exercising offline: what the scout read before the first
+ * turn, and what the model read during exploration. The excerpt in each case is
+ * taken from the `read_file` output with the line-number gutter stripped, which is
+ * exactly what a real model does when it quotes code — and it is what the ledger can
+ * verify, because the ledger holds the raw slice without the gutter.
  */
 function buildMockBodyFromConversation(steps: readonly ConversationStep[]): AnalysisBody {
   const firstUser = steps.find((step) => step.kind === "user");
-  const body = buildMockBody(firstUser?.kind === "user" ? firstUser.text : "");
+  const promptText = firstUser?.kind === "user" ? firstUser.text : "";
+  const body = buildMockBody(promptText);
+
+  const cited: Evidence[] = [];
+  const components: Component[] = [];
+
+  // The scout's reads, quoted from the prompt section they arrived in. A real model
+  // sees them exactly here, so citing them from here is the same act — and if the
+  // section were ever rendered in a form grounding could not verify, this is the
+  // test that would fail.
+  for (const block of parseScoutEvidenceBlocks(promptText)) {
+    const parsed = parseReadFileOutput(block.output);
+    if (!parsed) continue;
+    const evidence: Evidence = {
+      type: "file",
+      source: parsed.path,
+      location: parsed.location,
+      excerpt: parsed.excerpt,
+      supports: `Content of ${parsed.path}, found by searching for ${block.matched} and read before the first turn.`,
+    };
+    cited.push(evidence);
+    components.push({
+      name: parsed.path,
+      path: parsed.path,
+      responsibility: `Located by repository search on ${block.matched}, then read. Its contents were returned by read_file, not inferred.`,
+      evidence: [evidence],
+    });
+  }
 
   const read = steps.filter((step) => step.kind === "toolResult" && step.name === "read_file" && !step.isError);
   const latest = read.at(-1);
-  if (latest?.kind !== "toolResult") return body;
-
-  const parsed = parseReadFileOutput(latest.output);
-  if (!parsed) return body;
-
-  const fileEvidence: Evidence = {
-    type: "file",
-    source: parsed.path,
-    location: parsed.location,
-    excerpt: parsed.excerpt,
-    supports: `Content of ${parsed.path}, read during exploration.`,
-  };
-
-  return {
-    ...body,
-    summary: `${body.summary} During exploration, ${parsed.path} was read directly.`,
-    components: [
-      ...body.components,
-      {
+  if (latest?.kind === "toolResult") {
+    const parsed = parseReadFileOutput(latest.output);
+    if (parsed) {
+      const evidence: Evidence = {
+        type: "file",
+        source: parsed.path,
+        location: parsed.location,
+        excerpt: parsed.excerpt,
+        supports: `Content of ${parsed.path}, read during exploration.`,
+      };
+      cited.push(evidence);
+      components.push({
         name: parsed.path,
         path: parsed.path,
         responsibility: "File read during exploration. Its contents were returned by read_file, not inferred.",
-        evidence: [fileEvidence],
-      },
-    ],
-    evidence: [...body.evidence, fileEvidence],
+        evidence: [evidence],
+      });
+    }
+  }
+
+  if (cited.length === 0) return body;
+
+  const paths = [...new Set(components.map((component) => component.path ?? component.name))];
+  return {
+    ...body,
+    summary: `${body.summary} ${paths.length} file(s) were read directly: ${paths.join(", ")}.`,
+    components: [...body.components, ...components],
+    evidence: [...body.evidence, ...cited],
     confidence: 0.4,
   };
+}
+
+/** One `### SCOUT EVIDENCE:` block from the reconnaissance prompt. */
+interface ScoutEvidenceBlock {
+  path: string;
+  matched: string;
+  /** The `read_file` output the block wraps, verbatim. */
+  output: string;
+}
+
+/**
+ * Reads the scout's prompt section back into blocks.
+ *
+ * The mock parses the rendered text rather than being handed the scout's structured
+ * result, deliberately: it must only be able to see what a real model sees. If the
+ * heading format and this parser ever disagree, that is a real defect — the model
+ * would have no way to name the file it is citing — and the mock is where it shows up.
+ */
+function parseScoutEvidenceBlocks(prompt: string): ScoutEvidenceBlock[] {
+  const blocks: ScoutEvidenceBlock[] = [];
+  const lines = prompt.split("\n");
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const header = /^### SCOUT EVIDENCE: (\S+) \(matched: (.*)\)$/.exec(lines[index] ?? "");
+    if (!header?.[1]) continue;
+    const body: string[] = [];
+    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+      const line = lines[cursor];
+      if (line === undefined || line === "### END SCOUT EVIDENCE") break;
+      body.push(line);
+    }
+    blocks.push({ path: header[1], matched: header[2] ?? "", output: body.join("\n") });
+  }
+
+  return blocks;
 }
 
 interface ParsedReadFile {

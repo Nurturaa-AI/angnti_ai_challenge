@@ -139,6 +139,9 @@ const defaultBudget: ExplorationBudget = {
   maxFileBytes: 24_000,
   maxListEntries: 200,
   maxListDepth: 3,
+  maxScoutTerms: 14,
+  maxScoutSearches: 14,
+  maxScoutFiles: 4,
 };
 
 beforeEach(() => {
@@ -259,6 +262,49 @@ describe("runAdvanced — the exploration loop", () => {
     expect(record.meta.exploration?.bytesFromTools).toBeGreaterThan(0);
   });
 
+  it("replays several calls from one turn as calls-then-results, not interleaved", async () => {
+    // The other failure a real run found and an offline one cannot: Gemini models a
+    // turn as all of its function calls followed by all of their results, and rejects
+    // the chronological arrangement — call, result, call, result — with "400 Request
+    // contains an invalid argument". It cost a whole evaluation case, and it appeared
+    // only once the model had enough context to ask for two files at once.
+    const client = new ScriptedClient(
+      [
+        {
+          text: "Both files are relevant.",
+          toolCalls: [
+            call("c1", "read_file", { path: "src/extract.js" }),
+            call("c2", "read_file", { path: "src/dispatch.js" }),
+          ],
+        },
+        { text: "Done." },
+      ],
+      body(),
+    );
+
+    await run(client);
+
+    const steps = client.requests[1]?.steps ?? [];
+    expect(steps.map((step) => step.kind)).toEqual([
+      "user",
+      "model",
+      "toolCall",
+      "toolCall",
+      "toolResult",
+      "toolResult",
+    ]);
+    // Reordering the replay must not reorder anything else: each result still pairs
+    // with its own call, and the pairs are still in the order the model asked.
+    const calls = steps.filter((step): step is ConversationStep & { kind: "toolCall" } => step.kind === "toolCall");
+    const results = steps.filter(
+      (step): step is ConversationStep & { kind: "toolResult" } => step.kind === "toolResult",
+    );
+    expect(calls.map((step) => step.id)).toEqual(["c1", "c2"]);
+    expect(results.map((step) => step.callId)).toEqual(["c1", "c2"]);
+    expect(results[0]?.output).toContain("export function extract() {}");
+    expect(results[1]?.output).toContain("const REGISTRY");
+  });
+
   it("feeds a failed tool call back as an error the model can act on", async () => {
     const client = new ScriptedClient(
       [
@@ -271,7 +317,13 @@ describe("runAdvanced — the exploration loop", () => {
 
     const record = await run(client);
 
-    expect(record.meta.exploration).toMatchObject({ toolCalls: 2, failedToolCalls: 1, filesRead: ["src/extract.js"] });
+    expect(record.meta.exploration).toMatchObject({ toolCalls: 2, failedToolCalls: 1 });
+    // The recovery read landed; the escape attempt contributed nothing. `filesRead` is
+    // the union of the scout's reads and the model's, so it is asserted by membership
+    // rather than as an exact list — what matters is which files the refusal did and
+    // did not put in the ledger.
+    expect(record.meta.exploration?.filesRead).toContain("src/extract.js");
+    expect(record.meta.exploration?.filesRead.join(" ")).not.toContain("passwd");
     const failed = client.requests[1]?.steps.find(
       (step): step is ConversationStep & { kind: "toolResult" } => step.kind === "toolResult",
     );
@@ -346,8 +398,9 @@ describe("runAdvanced — the exploration budget", () => {
     const record = await run(client, { maxToolCalls: 2 });
 
     expect(record.meta.exploration).toMatchObject({ toolCalls: 2, budgetExhausted: true });
-    // The third call was never executed, and never reached the filesystem.
-    expect(record.meta.exploration?.filesRead).toEqual([]);
+    // The third call was never executed, and never reached the filesystem: the file it
+    // named is absent from the ledger even though the scout read a different one.
+    expect(record.meta.exploration?.filesRead).not.toContain("src/extract.js");
     const refusal = client.requests[2]?.steps.find(
       (step): step is ConversationStep & { kind: "toolResult" } =>
         step.kind === "toolResult" && step.callId === "c3",
@@ -394,6 +447,91 @@ describe("runAdvanced — the exploration budget", () => {
   });
 });
 
+describe("runAdvanced — the evidence scout", () => {
+  /** The reconnaissance prompt, as the model received it on its first turn. */
+  function firstPrompt(client: ScriptedClient): string {
+    const opening = client.requests[0]?.steps[0];
+    return opening?.kind === "user" ? opening.text : "";
+  }
+
+  it("adds search evidence to the reconnaissance context instead of replacing it", async () => {
+    // Iteration 1's second failure mode, pinned as a test. It traded breadth for depth
+    // and lost a question the baseline had answered from the README alone, so the rule
+    // is that the shallow context survives verbatim whatever the scout goes on to read.
+    const client = new ScriptedClient([{ text: "Done." }], body());
+
+    await run(client);
+    const prompt = firstPrompt(client);
+
+    for (const id of ["tree", "README.md", "package.json", "metadata"]) {
+      expect(prompt).toContain(`### SOURCE: ${id}`);
+    }
+    expect(prompt).toContain("A demo pipeline.");
+    expect(prompt).toContain("## Evidence found by repository search");
+    expect(prompt).toContain("### SCOUT EVIDENCE: src/dispatch.js");
+    // Order matters as much as presence: reconnaissance first, search evidence after it.
+    expect(prompt.indexOf("### SOURCE: tree")).toBeLessThan(prompt.indexOf("## Evidence found by repository search"));
+  });
+
+  it("searches before the model's first turn, with no model call to choose the terms", async () => {
+    const client = new ScriptedClient([{ text: "The search evidence already covers this." }], body());
+
+    const record = await run(client);
+
+    // Two requests: one exploration turn and the synthesis turn. Extracting terms with
+    // another model call would show up here as a third, and would cost tokens and
+    // determinism both.
+    expect(client.requests).toHaveLength(2);
+    expect(record.meta.exploration?.scout?.searches).toBeGreaterThan(0);
+    expect(record.meta.exploration?.scout?.filesRead).toBe(1);
+    expect(firstPrompt(client)).toContain("const REGISTRY");
+  });
+
+  it("records the scout's work separately from the model's tool budget", async () => {
+    const client = new ScriptedClient(
+      [{ toolCalls: [call("c1", "list_directory", {})] }, { text: "Done." }],
+      body(),
+    );
+
+    const record = await run(client);
+    const exploration = record.meta.exploration;
+
+    // The scout's cost is fixed and declared; the model's is discretionary. Summing them
+    // would make "the agent explored more this iteration" unreadable from the numbers.
+    expect(exploration?.toolCalls).toBe(1);
+    expect(exploration?.callsByTool).toEqual({ list_directory: 1 });
+    expect(exploration?.scout).toMatchObject({ searches: 6, searchesWithMatches: 3, candidates: 1, filesRead: 1 });
+    // What the ledger holds is the union, because grounding does not distinguish them.
+    expect(exploration?.filesRead).toEqual(["src/dispatch.js"]);
+    expect(exploration?.bytesFromTools).toBeGreaterThan(record.meta.exploration?.scout?.bytesRead ?? 0);
+  });
+
+  it("puts the scout's reads in the ledger and in the closed list of citable ids", async () => {
+    const client = new ScriptedClient([{ text: "Done." }], body());
+
+    const record = await run(client);
+    const citable = record.meta.contextSources.map((source) => source.id);
+
+    expect(citable).toContain("src/dispatch.js");
+    expect(record.meta.contextSources.find((source) => source.id === "src/dispatch.js")?.type).toBe("file");
+    const synthesis = record.trajectory.find((step) => step.action === "build-synthesis-prompt");
+    expect(synthesis?.detail).toMatchObject({ filesRead: ["src/dispatch.js"] });
+  });
+
+  it("can be switched off entirely, leaving the iteration 1 pipeline behind", async () => {
+    // The experiment needs its own control: with a zero scout budget the run is
+    // iteration 1 again, which is what makes the measured delta attributable.
+    const client = new ScriptedClient([{ text: "Done." }], body());
+
+    const record = await run(client, { maxScoutSearches: 0, maxScoutFiles: 0 });
+
+    expect(record.meta.exploration?.scout).toMatchObject({ searches: 0, filesRead: 0, candidates: 0 });
+    expect(record.meta.exploration?.filesRead).toEqual([]);
+    expect(firstPrompt(client)).not.toContain("## Evidence found by repository search");
+    expect(firstPrompt(client)).toContain("### SOURCE: tree");
+  });
+});
+
 describe("runAdvanced — the trajectory", () => {
   it("records the instruction, each model response, each tool call and result, and the outcome", async () => {
     const client = new ScriptedClient(
@@ -409,6 +547,8 @@ describe("runAdvanced — the trajectory", () => {
 
     expect(actions).toEqual([
       "collect-context",
+      "scout-search",
+      "scout-read",
       "build-recon-prompt",
       "model-turn",
       "tool-call",
@@ -418,6 +558,11 @@ describe("runAdvanced — the trajectory", () => {
       "validate-schema",
       "ground-evidence",
     ]);
+    // The ordering is the point of iteration 2, not an accident of this list: the
+    // deterministic search runs to completion before the model gets a turn, so the
+    // model is reasoning about evidence rather than about which filename to guess.
+    expect(actions.indexOf("scout-search")).toBeLessThan(actions.indexOf("model-turn"));
+    expect(actions.indexOf("scout-read")).toBeLessThan(actions.indexOf("build-recon-prompt"));
     for (const step of record.trajectory) {
       expect(typeof step.at).toBe("string");
       expect(step.durationMs).toBeGreaterThanOrEqual(0);
@@ -597,11 +742,40 @@ describe("runAdvanced — grounding of tool-derived evidence", () => {
       body({ evidence: [fileEvidence("src/dispatch.js", "const REGISTRY = { extract, load };")] }),
     );
 
-    const record = await run(client);
+    // The scout is switched off for this one so that a search is the *only* thing that
+    // touched the file. With it on, the scout would have read src/dispatch.js legitimately
+    // and the citation would be verifiable — which is correct behaviour, but a different
+    // claim from the one under test here.
+    const record = await run(client, { maxScoutFiles: 0 });
 
     expect(record.meta.exploration?.filesRead).toEqual([]);
     expect(record.result.evidence).toEqual([]);
     expect(record.meta.evidenceAudit.dropped).toHaveLength(1);
+  });
+
+  it("keeps a citation of what the scout read, and still drops one of what nobody read", async () => {
+    // The risk a pre-read phase introduces: a fuller ledger becoming a looser one. The
+    // scout reads src/dispatch.js before the first turn, so quoting it is legitimate
+    // even though the model never called read_file itself — and src/extract.js, which
+    // no tool opened, is refused exactly as before.
+    const client = new ScriptedClient(
+      [{ text: "The search evidence already covers this." }],
+      body({
+        evidence: [
+          fileEvidence("src/dispatch.js", "const REGISTRY = { extract, load };"),
+          fileEvidence("src/extract.js", "export function extract() {}"),
+        ],
+      }),
+    );
+
+    const record = await run(client);
+
+    expect(record.meta.exploration?.toolCalls).toBe(0);
+    expect(record.meta.exploration?.filesRead).toEqual(["src/dispatch.js"]);
+    expect(record.result.evidence.map((evidence) => evidence.source)).toEqual(["src/dispatch.js"]);
+    expect(record.result.evidence[0]?.grounded).toBe(true);
+    expect(record.meta.evidenceAudit.dropped).toHaveLength(1);
+    expect(record.meta.evidenceAudit.dropped[0]?.source).toBe("src/extract.js");
   });
 
   it("lets a directory listing prove existence, under the tree source", async () => {

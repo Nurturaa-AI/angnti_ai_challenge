@@ -7,12 +7,13 @@ know what it does, how it is put together, where the sharp edges are, and which 
 read first. Repo Archaeologist produces that briefing — and cites its sources, so you can
 check it instead of trusting it.
 
-> **Status: baseline measured, Iteration 1 measured and rejected.** The baseline analyser and
-> the evaluation harness are complete and have been run against a real model. Iteration 1 —
-> letting the model search and read files — is implemented, tested, and **scored 7.1 points
-> worse than the baseline** on the primary metric. It ships behind `--system advanced`,
-> unpromoted. See [`docs/improvement-changelog.md`](docs/improvement-changelog.md) for the
-> numbers and the diagnosis.
+> **Status: baseline measured, Iteration 1 rejected, Iteration 2 measured and kept.** The
+> baseline analyser and the evaluation harness are complete and have been run against a real
+> model. Iteration 1 — letting the model search and read files — **scored 7.1 points worse than
+> the baseline** and was rejected. Iteration 2 — making the search deterministic and running it
+> *before* the model gets a turn — **scored 21.4 points better**, at 85.7 % against the
+> baseline's 64.3 %. See [`docs/improvement-changelog.md`](docs/improvement-changelog.md) for
+> both numbers and the diagnosis behind each.
 
 ---
 
@@ -71,7 +72,10 @@ stdout and never written to any file in `reports/`, `trajectories/` or
 ```sh
 # Brief a local repository
 pnpm repo:baseline -- ./path/to/repository
-pnpm repo:advanced -- ./path/to/repository     # same, but it may search and read files
+pnpm repo:advanced -- ./path/to/repository     # same, but it searches and reads files first
+
+# Aim the search phase at a question you already have
+pnpm repo:advanced -- ./path/to/repository --focus "how are steps dispatched?"
 
 # Same, with no API key and no cost — the offline deterministic provider
 pnpm repo:baseline -- ./fixtures/orders-api --mock
@@ -94,13 +98,13 @@ for tooling. The two systems write to separate `latest-` files and never overwri
 other's.
 
 `--help` lists every flag (`--model`, `--seed`, `--thinking`, `--max-output`, `--out`,
-`--cases`, `--case`, `--system`, `--case-delay`, `--quiet`, plus the seven exploration-budget
-flags).
+`--cases`, `--case`, `--system`, `--case-delay`, `--quiet`, `--focus`, plus the ten
+exploration-budget flags).
 
 ## Test
 
 ```sh
-pnpm test         # 292 tests
+pnpm test         # 362 tests
 pnpm typecheck    # tsc --noEmit, strict
 ```
 
@@ -133,8 +137,18 @@ branch name, or the body of any source file.
 
 ## What the advanced system adds
 
-Iteration 1 keeps all of the above and adds three read-only tools plus a bounded number of
-turns in which to use them:
+It keeps all of the above — the reconnaissance context is **preserved, not replaced** — and adds
+two things.
+
+**A deterministic Evidence Scout (Iteration 2), which runs before the model gets a turn.** It
+extracts search terms, searches the repository for each, deduplicates and ranks the matching
+files, and reads the highest-scoring few. No model call is involved: term extraction is
+tokenize → drop stop words → keep technical tokens → detect compounds → apply a small synonym
+table, all pure functions. This exists because Iteration 1 gave the model a search tool and it
+used it **zero** times out of seven calls, guessing filenames from the directory tree instead.
+
+**Three read-only tools plus a bounded number of turns**, which the model still has after the
+scout finishes — the scout sets a floor on the evidence, not a ceiling:
 
 | Tool | Does | Produces citable evidence? |
 | --- | --- | --- |
@@ -143,14 +157,15 @@ turns in which to use them:
 | `list_directory` | Bounded-depth listing | No |
 
 The structure that makes this trustworthy is the **evidence ledger**. It begins as the four
-reconnaissance sources and grows *only* when a tool actually returns bytes. Grounding then runs
-against the ledger, so the model's own prose can never be the thing that authorises a citation:
-claim to have read a file you never opened and the citation is dropped, the claim is marked
-unsupported, and the reason is recorded in the trajectory.
+reconnaissance sources and grows *only* when a tool actually returns bytes. The scout's reads go
+through the same `read_file`, the same boundary check and the same `recordAll` — there is no
+privileged path in. Grounding then runs against the ledger, so the model's own prose can never be
+the thing that authorises a citation: claim to have read a file you never opened and the citation
+is dropped, the claim is marked unsupported, and the reason is recorded in the trajectory.
 
-Exploration is bounded and every bound is configurable — turns, tool calls, search results,
-file lines, file bytes, directory entries, directory depth. See
-[`docs/architecture.md`](docs/architecture.md#advanced--targeted-exploration-iteration-1).
+Exploration is bounded and every bound is configurable — turns, tool calls, search results, file
+lines, file bytes, directory entries, directory depth, and the three scout limits. See
+[`docs/architecture.md`](docs/architecture.md#advanced--search-then-targeted-exploration-iterations-12).
 
 ## Scoring
 
@@ -172,34 +187,46 @@ this in full.
 
 ## Has it been measured?
 
-**Yes — and the first iteration made it worse.**
+**Yes. The first iteration made it worse; the second beat the baseline.**
 
 Both systems, same 14 questions, same model (`gemini-3.5-flash-lite`), same seed, same
-evaluator, neither run with a failed case:
+evaluator, same unmodified cases, neither run with a failed case:
 
-| | Baseline | Advanced (Iteration 1) |
-| --- | --- | --- |
-| **Evidence-backed task accuracy** | **64.3 % (9/14)** | **57.1 % (8/14)** |
-| Answer accuracy | 85.7 % (12/14) | 85.7 % (12/14) |
-| Mean evidence relevance | 0.85 | 0.68 |
-| Fabrications | 0 | 0 |
-| Dropped citations | 0 | 0 |
-| Cost | $0.011935 | $0.024957 |
+| | Baseline | Iteration 1 (rejected) | Iteration 2 (kept) |
+| --- | --- | --- | --- |
+| **Evidence-backed task accuracy** | **64.3 % (9/14)** | 57.1 % (8/14) | **85.7 % (12/14)** |
+| Answer accuracy | 85.7 % (12/14) | 85.7 % (12/14) | 100.0 % (14/14) |
+| Cases passed | 0 / 2 | 0 / 2 | 2 / 2 |
+| Mean evidence relevance | 0.85 (n=10) | 0.68 | 0.7321 (n=14) |
+| Fabrications | 0 | 0 | 0 |
+| Dropped citations | 0 | 0 | 0 |
+| Cost | $0.011935 | $0.024957 | $0.033038 |
 
-Iteration 1 cost 2.1× as much and scored 7.1 points lower on the metric it was built to move.
-Under the pre-stated decision rule it is **rejected**: it ships, but nothing here claims it as
-an improvement.
+Iteration 2 is **+21.4 points** on the primary metric over the baseline and **+28.6** over
+Iteration 1, for 2.77× the baseline's cost — or 2.08× per evidence-backed answer actually
+delivered.
 
-Two of the four changed questions did improve exactly as predicted — one went from wrong to
-right *because* the agent opened the source file. Three regressed because the agent cited the
-implementation where the case expects the README, and one regressed for real: it went deep on
-one flow and produced a narrower briefing that missed a detail the baseline caught. The full
-decomposition, including why the dataset is not being adjusted to rescue the result, is in
+What changed between the two iterations is *when* the search happens. Iteration 1 offered the
+model a search tool and it never used it; the question that motivated the whole exercise —
+*"how is a step's declared type mapped to the function that runs it?"* — failed because the
+agent guessed filenames instead of searching for the concept. Iteration 2 searches first,
+deterministically: the term `dispatch`, drawn from the repository's own documentation, matched
+`pyflow/steps/__init__.py`, the scout read it, and an answer that had failed twice became correct
+and cited.
+
+Two things are reported honestly rather than quietly. One question regressed —
+`pyflow/q3-execution-order` still answers correctly but cites `pipeline.py` where the case names
+`README.md`, the same dataset artefact that cost Iteration 1 three questions and is still
+unfixed. And mean evidence relevance fell, because it is a precision measure averaged over
+different numbers of questions for the two systems (10 vs 14) and it penalises a claim for citing
+three verified sources where the case named one. Like-for-like the decline is 0.075, and every
+extra citation was grounded. Both are decomposed in
 [`docs/improvement-changelog.md`](docs/improvement-changelog.md).
 
-Worth stating separately, because it is the result that carries: **the grounding layer held
-completely.** Zero fabrications and zero dropped citations on both sides. Giving the model file
-access bought no invented quotations at all.
+Worth stating separately, because it is the result that carries across all three runs: **the
+grounding layer held completely.** Zero fabrications and zero dropped citations every time — 31
+of 31 citations grounded on Iteration 2. Giving the model file access, and then handing it four
+more files it did not ask for, bought no invented quotations at all.
 
 ---
 
@@ -208,7 +235,7 @@ access bought no invented quotations at all.
 ```
 apps/cli/              Argument parsing, the three commands, exit codes
 baseline/              The baseline analyser: prompt, run loop, Markdown rendering
-advanced/              Iteration 1: the exploring agent — prompt, tool loop, budget
+advanced/              The exploring agent: prompt, scout phase, tool loop, budget
 evaluation/            The evaluation runner, plus cases/ and results/
 packages/shared/       Schemas, context collection, tools, grounding, LLM clients, IO
 packages/evaluator/    Case loading, matching, scoring, aggregation, reporting
@@ -232,10 +259,16 @@ version: two cases is a tiny dataset, keyword matching is not comprehension,
 `mustNotContain` is naive substring matching, and the baseline cannot answer any question
 whose evidence lives inside a source file.
 
-Iteration 1 added one more, and it is the reason the measurement above should be read as a
-signal rather than a verdict on exploration itself: each case's `expectedEvidence` was written
-when reconnaissance context was all any system had, so it lists only files the baseline could
-see. A system that cites the implementation instead of the README describing it is scored down
-for citing better evidence. That is a real flaw in the dataset — but fixing it *after* seeing
-which files the advanced system chose would be fitting the ruler to the result, so Iteration 1's
-number stands as measured and the dataset is Iteration 2's problem.
+The most serious one is the dataset's, and it survived two iterations: each case's
+`expectedEvidence` was written when reconnaissance context was all any system had, so it lists
+only files the baseline could see. A system that cites the implementation instead of the README
+describing it is scored down for citing better evidence. **Both questions Iteration 2 still fails
+are this artefact** — the answers are correct and the citations are grounded in files that genuinely
+contain the answer; they are simply not the files the case names. Fixing it *after* seeing which
+files the advanced system chose would be fitting the ruler to the result, so it has been left
+alone twice and belongs to its own pre-registered iteration, re-run against both systems.
+
+One more worth naming, since it is the number that moved the wrong way: mean evidence relevance is
+a precision measure averaged only over questions where it was measurable, so the two systems'
+figures have different denominators — and it scores a claim *lower* for citing three verified
+sources where the case named one. Read it alongside the primary metric, not as a substitute.

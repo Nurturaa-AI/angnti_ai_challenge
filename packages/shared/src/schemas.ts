@@ -219,6 +219,28 @@ export type TrajectoryStep = z.infer<typeof TrajectoryStepSchema>;
  * explore, which is why every field lives under one optional object rather than
  * being sprinkled across `RunMeta`.
  */
+/**
+ * What the deterministic scout did, before the model had a turn.
+ *
+ * Reported separately from the model's own exploration rather than folded into it.
+ * The two are different kinds of cost — the scout's is fixed and declared up front,
+ * the model's is discretionary — and a comparison across iterations needs to be able
+ * to tell "the search phase found the file" from "the model went looking for it".
+ */
+export const ScoutSummarySchema = z.object({
+  termsExtracted: z.number().int().min(0),
+  searches: z.number().int().min(0),
+  /** Searches that returned at least one hit. The gap is the term list's miss rate. */
+  searchesWithMatches: z.number().int().min(0),
+  /** Distinct files that matched at least one term, before the read budget was applied. */
+  candidates: z.number().int().min(0),
+  filesRead: z.number().int().min(0),
+  bytesRead: z.number().int().min(0),
+  /** Ranked candidates left unread because the file budget ran out. */
+  candidatesSkipped: z.number().int().min(0),
+});
+export type ScoutSummaryRecord = z.infer<typeof ScoutSummarySchema>;
+
 export const ExplorationSummarySchema = z.object({
   /** Model round trips, including the final synthesis call. */
   turns: z.number().int().min(0),
@@ -235,6 +257,8 @@ export const ExplorationSummarySchema = z.object({
   budgetExhausted: z.boolean(),
   /** The limits this run operated under, so a result can be reproduced. */
   budget: z.record(z.string(), z.number()),
+  /** Present only when a deterministic scout ran ahead of the model. */
+  scout: ScoutSummarySchema.optional(),
 });
 export type ExplorationSummary = z.infer<typeof ExplorationSummarySchema>;
 

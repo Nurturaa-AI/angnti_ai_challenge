@@ -199,9 +199,11 @@ system produced it — no flag, no version check, no heuristic on the evidence t
 
 Scoring Iteration 1 required **no** change to `packages/evaluator`: no new evidence type, no
 new matching rule, no threshold adjustment, no exemption. The `file` evidence type a tool
-produces was already in `CONTENT_TYPES` because the schema always allowed it. If the advanced
-system's number had required touching the scorer to obtain, the number would not have been
-worth reporting.
+produces was already in `CONTENT_TYPES` because the schema always allowed it. Scoring
+Iteration 2 required none either — the deterministic search phase produces `file` evidence
+through the same `read_file`, so the scorer cannot tell a scout-read file from a model-read one,
+and does not try. If either system's number had required touching the scorer to obtain, the
+number would not have been worth reporting.
 
 For the same reason, `--case-delay` and the retry backoff apply identically to both systems. A
 harness more patient with one of them would be measuring its own retry loop.
@@ -231,23 +233,25 @@ there would read as free.
 
 ## Current results
 
-Both systems, same 14 questions, same model, same seed, same thinking level, same evaluator.
-Neither run had a failed case.
+Both systems, same 14 questions, same model, same seed, same thinking level, same evaluator,
+same unmodified cases. Neither run had a failed case.
 
-| | Baseline | Advanced (Iteration 1) |
+| | Baseline | Advanced (Iteration 2) |
 | --- | --- | --- |
-| Run id | `eval-baseline-2026-08-31T00-01-17Z` | `eval-advanced-2026-08-31T00-11-08Z` |
-| **Evidence-backed task accuracy** | **64.3 % (9/14)** | **57.1 % (8/14)** |
-| Answer accuracy | 85.7 % (12/14) | 85.7 % (12/14) |
+| Run id | `eval-baseline-2026-08-31T03-44-47Z` | `eval-advanced-2026-08-31T04-03-32Z` |
+| **Evidence-backed task accuracy** | **64.3 % (9/14)** | **85.7 % (12/14)** |
+| Answer accuracy | 85.7 % (12/14) | 100.0 % (14/14) |
+| Cases passed | 0 / 2 | 2 / 2 |
 | Partial-evidence answers | 0 | 0 |
-| Unsupported answers | 2 | 1 |
+| Unsupported answers | 2 | 0 |
 | Fabrications | 0 | 0 |
 | Briefing unsupported claims | 0 | 0 |
 | Dropped citations | 0 | 0 |
-| Mean evidence relevance | 0.85 | 0.68 |
-| Tokens | 2 450 in / 4 480 out | 39 088 in / 5 292 out |
-| Cost | $0.011935 | $0.024957 |
-| Wall clock | 33.6 s | 53.8 s |
+| Mean evidence relevance | 0.85 (n=10) | 0.7321 (n=14) |
+| Tokens | 2 450 in / 4 480 out | 56 795 in / 6 400 out |
+| Cost | $0.011935 | $0.033038 |
+| Cost per evidence-backed answer | $0.001326 | $0.002753 |
+| Wall clock | 38.3 s | 54.0 s |
 
 Model `gemini-3.5-flash-lite`, seed 7, thinking level `low`, provider `gemini`. Commands:
 
@@ -256,27 +260,44 @@ pnpm evaluate:baseline -- --model gemini-3.5-flash-lite --case-delay 20
 pnpm evaluate:advanced -- --model gemini-3.5-flash-lite --case-delay 25
 ```
 
-**Iteration 1 regressed the primary metric by 7.1 points and cost 2.1× as much.** Under the
-pre-stated decision rule it is rejected as an improvement. The per-question decomposition, the
-two distinct causes, and the reason the dataset is *not* being adjusted to rescue the result are
-in [`improvement-changelog.md`](improvement-changelog.md).
+Wall clock includes the inter-case delay each command sets. Net of it, 18.3 s → 29.0 s.
 
-Read these numbers with caveat 1 below firmly in mind: on a 14-question dataset a 7.1-point
-move **is one question**. The regression is real and it is what the run produced, but its
-magnitude is at the resolution limit of the dataset. What deserves more weight than the
-percentage is the *mechanism* the per-question breakdown exposes — the agent never called
-`search_code`, and it substituted one implementation citation for several documentation
-citations. Those are structural findings, and they would not change if the dataset were ten
-times larger.
+**Iteration 2 improved the primary metric by 21.4 points.** It adds a deterministic search
+phase — extract terms, search, rank candidates, read the best few — before the model gets a
+turn, on the finding that Iteration 1's agent never called `search_code` once. Four questions
+became evidence-backed, one regressed, two previously-wrong answers became right. Under the
+pre-stated decision rule it is **kept**. Full decomposition in
+[`improvement-changelog.md`](improvement-changelog.md).
 
-One result here needs no caveat: **zero fabrications and zero dropped citations on both
-systems.** Every citation the exploring agent made verified against bytes a tool had actually
-returned. That is the property that had to hold before file access could be trusted at all.
+For the record, since a rejected iteration is easy to quietly forget: **Iteration 1 scored
+57.1 %, below the baseline's 64.3 %, and was rejected.** Iteration 2 is measured against the
+baseline, not against it.
+
+Read these numbers with caveat 1 below firmly in mind: on a 14-question dataset, 21.4 points is
+**three questions**. What deserves more weight than the percentage is the mechanism the
+per-question breakdown exposes. `pyflow/q6-step-dispatch` — the question that motivated both
+iterations — failed on the baseline and failed again on Iteration 1 because the agent guessed
+filenames instead of searching. Iteration 2's search phase found
+`pyflow/steps/__init__.py` from the term `dispatch`, read it, and the answer became correct and
+cited. That is a structural result; it would not change if the dataset were ten times larger.
+The exact margin would.
+
+Two results need no caveat. **Zero fabrications and zero dropped citations on both systems** —
+31 citations claimed across the advanced system's two cases, 31 grounded. And the baseline run
+**reproduced its previously recorded figures exactly**, down to the token counts and the cost,
+which is what makes the comparison like-for-like rather than two runs on different days.
+
+One figure moved the wrong way and is explained rather than excused: mean evidence relevance
+fell from 0.85 to 0.7321. See caveat 10 — the two means have different denominators, and the
+like-for-like decline is 0.075, driven by the advanced system citing *more* verified evidence
+per claim than the cases anticipate.
 
 An earlier pair of runs on `gemini-3.7-flash` is **not** reported here: that model's free-tier
 quota was exhausted mid-run, and the resulting failures were provider artefacts rather than
 model quality. Both systems were re-run on a model with quota headroom so the comparison stays
-like-for-like.
+like-for-like. A first Iteration 2 advanced run is also not reported: it crashed on a Gemini
+protocol error (parallel function calls replayed in the wrong arrangement) that was a
+pre-existing latent bug in the shared model path, and a crashed run is not a measurement.
 
 <a name="limitations"></a>
 ## Limitations
@@ -304,21 +325,64 @@ accident.
    ceiling on those is `partialEvidence`. This is intentional headroom, not an oversight — but
    it means the baseline's score is not a measure of "how good is an LLM at reading code".
 7. **`expectedEvidence` lists only what the baseline could see.** This is the limitation
-   Iteration 1 exposed, and it is the most serious one. Each question's expected-evidence list
-   was written when reconnaissance context was all any system had, so it names READMEs and
-   manifests. A system that answers correctly while citing the *implementation* — `pipeline.py`
-   for the topological sort, rather than the README sentence describing it — is scored as not
-   evidence-backed. It is penalised for citing the source of truth.
+   Iteration 1 exposed, it is the most serious one, and **it is still unfixed after Iteration
+   2.** Each question's expected-evidence list was written when reconnaissance context was all
+   any system had, so it names READMEs and manifests. A system that answers correctly while
+   citing the *implementation* — `pipeline.py` for the topological sort, rather than the README
+   sentence describing it — is scored as not evidence-backed. It is penalised for citing the
+   source of truth.
 
-   Three of Iteration 1's four regressions are this artefact rather than worse analysis.
-   Widening the lists is the obvious fix and it is deliberately **not** being applied
-   retroactively: adjusting `expectedEvidence` after seeing which files the advanced system
-   chose would be fitting the ruler to the result, and would make every subsequent number
-   unfalsifiable. The fix belongs to a future iteration, pre-registered and re-run against both
-   systems, with the old numbers left standing.
+   Three of Iteration 1's four regressions were this artefact. Iteration 2 fixed two of those
+   three but still loses `pyflow/q3-execution-order` and `orders-api/q4-auth-boundary` to it,
+   which is to say **the two questions the advanced system now fails are both this limitation,
+   not analysis failures.** Both answers are correct; both cite a file that genuinely contains
+   the answer; neither citation is the file the case names.
+
+   Widening the lists is the obvious fix and it has deliberately **not** been applied, twice
+   now: adjusting `expectedEvidence` after seeing which files the advanced system chose would be
+   fitting the ruler to the result and would make every subsequent number unfalsifiable. The fix
+   belongs to its own iteration, pre-registered and re-run against both systems, with the old
+   numbers left standing.
 8. **Fixture repositories are synthetic.** They were written to have the properties the cases
    test. Real repositories are messier, larger, and less tidily documented; scores here are an
    upper bound on what to expect in the wild.
 9. **`passedCases` is all-or-nothing.** A case where six of seven questions are right counts
    as not passed. It is a deliberately harsh secondary figure; the primary metric is the
    per-question one.
+10. **Mean evidence relevance has a moving denominator, and it penalises extra true
+    citations.** Two separate flaws in one number, both exposed by Iteration 2.
+
+    It is averaged only over questions where relevance was *measurable* — a question whose
+    claim carries no confirmed citation contributes nothing rather than a zero, because
+    reporting `0` there would be false. So a system that abstains on hard questions is averaged
+    over fewer, easier ones. The baseline's 0.85 is over 10 questions; Iteration 2's 0.7321 is
+    over all 14. Like-for-like on the baseline's own 10, Iteration 2 scores 0.775 — a 0.075
+    decline, not 0.118.
+
+    And because it is precision over `expectedEvidence`, a claim citing three verified sources
+    where the case names one scores 0.33 — *lower* than a claim citing that one source alone.
+    Every extra citation in the measured run was grounded against bytes a tool returned. The
+    metric is measuring conciseness there, not correctness. Read it alongside the primary
+    metric, never as a substitute for it, and do not optimise against it.
+11. **The scout's ranking rationale is only partially recoverable from the trajectory.** The
+    `scout-search` step records every candidate with its score, matched terms and reasons, but
+    the trajectory recorder caps a serialized detail at 2 000 characters
+    (`MAX_DETAIL_CHARS`); both fixtures land at 2 015 and are clipped with `... [truncated]`.
+    The search terms and the top-ranked candidates survive, and everything
+    reproducibility-critical is intact in `meta.exploration.scout` and the `scout-read` step —
+    but a full post-hoc audit of *why a losing candidate lost* is not always possible from the
+    trajectory file alone. Left as-is deliberately: raising a shared, intentionally-bounded
+    recorder's limit to improve one iteration's introspection was outside this experiment's
+    scope. The clean fix is a dedicated scout artefact rather than a bigger detail cap.
+
+12. **`systemVersion` does not distinguish Iteration 1 from Iteration 2.** Both advanced runs
+    record `systemVersion: "0.1.0"`, because `ADVANCED_VERSION` was deliberately left alone so
+    that a recorded run keeps matching the code that produced it. The consequence is that the
+    rejected 57.1 % run and the kept 85.7 % run are indistinguishable by that field alone. They
+    are distinguishable in practice — by `runId` timestamp, and by following a case's `runId`
+    into `trajectories/`, where only an Iteration 2 run contains `scout-search` and
+    `scout-read` steps — but the field that exists to identify the system does not do it on its
+    own. The fix belongs with the next change to the advanced system: bump the constant then, so
+    the version moves at the same moment the behaviour does, rather than retroactively now, which
+    would leave every already-recorded run pointing at a version that no longer exists.
+

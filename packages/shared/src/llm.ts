@@ -188,7 +188,7 @@ class GeminiLlmClient implements LlmClient {
         const interaction = await this.ai.interactions.create({
           model: this.model,
           system_instruction: request.systemInstruction,
-          input: request.steps.map(toApiStep),
+          input: toApiInput(request.steps),
           // Omitted entirely on the synthesis turn: an empty tool list and no tool
           // list are the same intent, and the latter is what the API expects.
           ...(request.tools.length > 0
@@ -260,6 +260,27 @@ class GeminiLlmClient implements LlmClient {
 
     throw wrapModelError(lastError, this.model);
   }
+}
+
+/**
+ * Our conversation history -> the Interactions API's `input` list.
+ *
+ * One rule is enforced here rather than at the call site, because it is a property of
+ * the wire format and not of a conversation: a `model_output` must carry text. An
+ * empty one is rejected with "400 Missing text in content of type text", which is
+ * what a turn where the model said nothing and went straight to a tool would produce.
+ * Such a turn contributes no step at all — the function call it made says everything
+ * it had to say.
+ *
+ * The ordering rule for parallel function calls is *not* enforced here, deliberately.
+ * A flat list cannot distinguish one turn that made two calls from two turns that each
+ * made one, so only the caller — which knows where its turns begin — can arrange them
+ * correctly. See the exploration loop in `advanced/`.
+ */
+export function toApiInput(steps: readonly ConversationStep[]): Interactions.Step[] {
+  return steps
+    .filter((step) => step.kind !== "model" || step.text.trim() !== "")
+    .map(toApiStep);
 }
 
 /** Our conversation vocabulary -> the Interactions API's `Step` union. */

@@ -15,6 +15,7 @@ import {
   groundAnalysis,
   loadExplorationBudget,
   parseModelJson,
+  runEvidenceScout,
   slugify,
   timestampSlug,
   validateWithSchema,
@@ -32,19 +33,28 @@ import {
 import { ADVANCED_RESPONSE_SCHEMA, ADVANCED_SYSTEM_INSTRUCTION, buildReconnaissancePrompt, buildSynthesisPrompt } from "./prompt";
 
 /**
- * The advanced system, iteration 1: targeted repository exploration.
+ * The advanced system: reconnaissance, then a deterministic search pass, then a
+ * bounded agent loop.
  *
- * Same shape as the baseline — repository in, grounded run record out — with one
- * structural change in the middle. Instead of a single call over shallow context,
- * the model gets that context plus three read-only tools, and a bounded number of
- * turns in which to close the gaps it identifies.
+ * Same shape as the baseline — repository in, grounded run record out — with two
+ * structural changes in the middle. The model gets the baseline's context plus three
+ * read-only tools and a bounded number of turns; and before it gets a turn at all,
+ * the Evidence Scout searches the repository for terms drawn from its own
+ * documentation, ranks what matched, and reads the best few files.
  *
- * The property that makes this trustworthy is the evidence ledger. It starts as
- * the reconnaissance context and grows only when a tool actually returns bytes.
- * Grounding then checks every citation against the ledger, so the model's own text
- * can never be the thing that authorises a citation. If it claims to have read a
- * file it never opened, the citation is dropped and the claim is recorded as
- * unsupported — visibly, in the audit and in the trajectory.
+ * That ordering is iteration 2's whole point. Iteration 1 gave the model a search
+ * tool and it used it zero times out of seven calls, guessing filenames instead. So
+ * the search stops being optional and starts being a phase. The model keeps its
+ * tools and can still explore — the scout sets a floor on the evidence, not a
+ * ceiling.
+ *
+ * The property that makes this trustworthy is the evidence ledger. It starts as the
+ * reconnaissance context and grows only when a tool actually returns bytes — the
+ * scout's reads go through the same `read_file`, the same boundary checks, the same
+ * `recordAll` door. Grounding then checks every citation against the ledger, so the
+ * model's own text can never be the thing that authorises a citation. If it claims
+ * to have read a file that was never opened, the citation is dropped and the claim
+ * is recorded as unsupported — visibly, in the audit and in the trajectory.
  */
 
 export const ADVANCED_SYSTEM_NAME = "advanced";
@@ -60,6 +70,16 @@ export interface RunAdvancedOptions {
   collectOptions?: CollectOptions;
   /** Injectable for deterministic run ids in tests. */
   now?: () => Date;
+  /**
+   * A question to aim the scout's search terms at. Reaches here from `--focus`.
+   *
+   * Not set during evaluation, deliberately. The harness never shows a system the
+   * questions it is scored on, so passing them here would hand the advanced system
+   * an advantage the baseline does not have and make the comparison meaningless.
+   * Without it the scout derives its terms from the repository's own documentation,
+   * which is the configuration every measured number in the changelog comes from.
+   */
+  focus?: string | undefined;
 }
 
 export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecord> {
@@ -86,24 +106,68 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
     directories: context.repository.directoryCount,
   });
 
-  const reconPrompt = buildReconnaissancePrompt({
-    repositoryName: context.repository.name,
-    sources: context.sources,
-    budget,
-  });
-  trajectory.step("build-recon-prompt", { promptChars: reconPrompt.length, budget: { ...budget } });
-
-  // 2. The exploration loop.
-  const conversation: ConversationStep[] = [{ kind: "user", text: reconPrompt }];
   const toolContext = { repositoryRoot: context.absolutePath, budget };
   const usageTotal: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
   const callsByTool: Record<string, number> = {};
   const filesRead: string[] = [];
 
-  let turns = 0;
   let toolCalls = 0;
   let failedToolCalls = 0;
   let bytesFromTools = 0;
+
+  // 2. The Evidence Scout: deterministic search, ranking and reading, with no model
+  //    in the loop. It runs first so that the model is reasoning about evidence
+  //    rather than about which filename to guess.
+  const scout = runEvidenceScout(toolContext, {
+    focus: options.focus,
+    sources: context.sources,
+    repositoryName: context.repository.name,
+  });
+
+  trajectory.step("scout-search", {
+    terms: scout.terms.map((term) => ({ term: term.term, origin: term.origin, weight: term.weight })),
+    searches: scout.searches,
+    // Every file the search reached and how it scored — including the ones that lost.
+    // What the ranking rejected is the half of its reasoning that is otherwise
+    // unrecoverable after the fact.
+    candidates: scout.candidates.map((candidate) => ({
+      path: candidate.path,
+      score: candidate.score,
+      matchedTerms: candidate.matchedTerms,
+      reasons: candidate.reasons,
+    })),
+  });
+
+  // The scout's artefacts enter through `recordAll`, exactly like the model's own
+  // tool results. There is no second door into the ledger and no privileged one.
+  for (const artifact of scout.artifacts) {
+    bytesFromTools += artifact.bytes;
+    if (artifact.type === "file" && !filesRead.includes(artifact.id)) filesRead.push(artifact.id);
+  }
+  ledger.recordAll(scout.artifacts);
+
+  trajectory.step("scout-read", {
+    reads: scout.reads,
+    summary: scout.summary,
+    ledgerSources: ledger.toArray().length,
+  });
+
+  const reconPrompt = buildReconnaissancePrompt({
+    repositoryName: context.repository.name,
+    sources: context.sources,
+    budget,
+    scoutEvidence: scout.evidence,
+  });
+  trajectory.step("build-recon-prompt", {
+    promptChars: reconPrompt.length,
+    scoutEvidenceChars: scout.evidence.length,
+    budget: { ...budget },
+  });
+
+  // 3. The exploration loop.
+  const conversation: ConversationStep[] = [{ kind: "user", text: reconPrompt }];
+
+  let turns = 0;
   let budgetExhausted = false;
   let lastModel = client.model;
 
@@ -142,12 +206,26 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
     if (response.text !== "") conversation.push({ kind: "model", text: response.text });
     if (response.toolCalls.length === 0) break;
 
+    // Gemini models a turn as *all* of its function calls followed by *all* of their
+    // results. Replaying them in the order they actually happened — call, result,
+    // call, result — is rejected with "400 Request contains an invalid argument", so
+    // the two kinds are collected here and appended in the provider's arrangement
+    // once the turn is done. Nothing else moves: tools still execute in the order the
+    // model asked for them, and the ledger and trajectory still record them that way.
+    const callSteps: ConversationStep[] = [];
+    const resultSteps: ConversationStep[] = [];
+
     for (const call of response.toolCalls) {
+      // Recorded even when the call is about to be refused. The model made it, so the
+      // history has to contain it: a function result whose call is missing is a
+      // malformed turn, not a shorter one.
+      callSteps.push({ kind: "toolCall", id: call.id, name: call.name, arguments: normalizeForHistory(call) });
+
       if (toolCalls >= budget.maxToolCalls) {
         budgetExhausted = true;
         // Told, not silently ignored: an unanswered call would leave the model
         // waiting for a result that never comes.
-        conversation.push({
+        resultSteps.push({
           kind: "toolResult",
           callId: call.id,
           name: call.name,
@@ -172,8 +250,7 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
       ledger.recordAll(outcome.artifacts);
 
       recordToolStep(trajectory, call, outcome);
-      conversation.push({ kind: "toolCall", id: call.id, name: call.name, arguments: normalizeForHistory(call) });
-      conversation.push({
+      resultSteps.push({
         kind: "toolResult",
         callId: call.id,
         name: call.name,
@@ -182,11 +259,13 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
       });
     }
 
+    conversation.push(...callSteps, ...resultSteps);
+
     if (toolCalls >= budget.maxToolCalls) budgetExhausted = true;
     if (turn === budget.maxTurns) budgetExhausted = true;
   }
 
-  // 3. Synthesis: no tools, strict schema, and a closed list of citable ids.
+  // 4. Synthesis: no tools, strict schema, and a closed list of citable ids.
   const citableIds = ledger.toArray().map((source) => source.id);
   const synthesisPrompt = buildSynthesisPrompt({ citableIds, filesRead, budgetExhausted });
   conversation.push({ kind: "user", text: synthesisPrompt });
@@ -219,7 +298,7 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
     );
   }
 
-  // 4. Parse and validate.
+  // 5. Parse and validate.
   const parsed = parseModelJson(finalResponse.text);
   const body = validateWithSchema(AnalysisBodySchema, parsed, "model analysis");
   trajectory.step("validate-schema", {
@@ -228,7 +307,7 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
     risks: body.risks.length,
   });
 
-  // 5. Grounding, against the ledger rather than against the initial context.
+  // 6. Grounding, against the ledger rather than against the initial context.
   const sources = ledger.toArray();
   const { body: groundedBody, audit } = groundAnalysis(body, sources);
   trajectory.step("ground-evidence", {
@@ -248,13 +327,20 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
 
   const exploration: ExplorationSummary = {
     turns,
+    // The model's own calls only. The scout's are reported beside them rather than
+    // added in: mixing a fixed cost into a discretionary budget would make "the agent
+    // explored more this iteration" unreadable from the numbers.
     toolCalls,
     failedToolCalls,
     callsByTool,
+    // Both systems' reads, because the ledger does not distinguish them and neither
+    // does grounding. This is the count that says how much of the repository the
+    // briefing was actually written from.
     filesRead,
     bytesFromTools,
     budgetExhausted,
     budget: { ...budget },
+    scout: scout.summary,
   };
 
   const record: RunRecord = {

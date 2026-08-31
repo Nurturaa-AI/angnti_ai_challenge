@@ -34,6 +34,7 @@ Everything both sides must agree on, and nothing else.
 | [`context-format.ts`](../packages/shared/src/context-format.ts) | Renders collected sources into the prompt block, with per-source truncation. |
 | [`grounding.ts`](../packages/shared/src/grounding.ts) | Verifies citations against the supplied context. The fabrication defence. |
 | [`tools/`](../packages/shared/src/tools/) | The three read-only tools, the repository boundary, and the dispatcher. |
+| [`scout/`](../packages/shared/src/scout/) | The Evidence Scout: term extraction, lexicon, candidate ranking, the search-and-read phase. No model call. |
 | [`json.ts`](../packages/shared/src/json.ts) | Extracts JSON from whatever the model actually returned; validates against a schema. |
 | [`llm.ts`](../packages/shared/src/llm.ts) | The `LlmClient` interface and the Gemini implementation. |
 | [`mock-llm.ts`](../packages/shared/src/mock-llm.ts) | An offline, deterministic, zero-cost provider. |
@@ -84,9 +85,9 @@ The Gemini client uses the **Interactions API** (`ai.interactions.create`) with
 takes a `seed` rather than a temperature, so the seed is the reproducibility lever and is
 recorded in every run's metadata.
 
-### Three things about Gemini tool use that only a real call reveals
+### Five things about Gemini tool use that only a real call reveals
 
-All three of these were found by running against the live API, and none of them can fail
+All five of these were found by running against the live API, and none of them can fail
 offline. They are recorded here because the code that handles them looks arbitrary otherwise.
 
 1. **`requires_action` is a success, not a failure.** When the model decides to call a
@@ -104,6 +105,24 @@ offline. They are recorded here because the code that handles them looks arbitra
    call ahead of it earns `Model turns with thought summaries must start with a thought block in
    thinking models`. The exploration loop therefore pushes `providerSteps` before the model's
    own text.
+4. **A turn's function calls all come before any of their results.** Replaying them in the order
+   they actually happened — call, result, call, result — earns `400 Request contains an invalid
+   argument`. The loop therefore collects `callSteps` and `resultSteps` within a turn and appends
+   them grouped. Tools still *execute* in the order the model asked, and the ledger and
+   trajectory still record them that way; only the replay is rearranged. This one is enforced in
+   the caller rather than in the adapter, because a flat `ConversationStep[]` cannot distinguish
+   one turn that made two calls from two turns that each made one — only the code that knows
+   where its turns begin can arrange them correctly.
+5. **A `model_output` must carry text.** An empty one earns `400 Missing text in content of type
+   text`, which is what a turn where the model said nothing and went straight to a tool would
+   produce. [`toApiInput`](../packages/shared/src/llm.ts) drops blank and whitespace-only model
+   steps for every caller; such a turn contributes nothing to the history, since the function
+   call it made says everything it had to say.
+
+Rules 4 and 5 were found during Iteration 2 but were **pre-existing latent bugs**, not
+regressions: rule 4 only fires when the model asks for two files in one turn, which Iteration 1's
+measured run never did. [`packages/shared/test/llm.test.ts`](../packages/shared/test/llm.test.ts)
+and one advanced test now pin all of them offline, which is the only way they stay fixed.
 
 Function calls and results are deliberately *excluded* from `providerSteps`: the harness
 reconstructs those from its own record of what it actually executed. That is what keeps a tool
@@ -143,13 +162,16 @@ claim that it could not back up?" — and get a number.
 
 ---
 
-## `advanced/` — targeted exploration (Iteration 1)
+## `advanced/` — search, then targeted exploration (Iterations 1–2)
 
-[`runAdvanced`](../advanced/src/index.ts) keeps the baseline's five steps and inserts a bounded
-exploration loop between step 2 and step 3.
+[`runAdvanced`](../advanced/src/index.ts) keeps the baseline's five steps and inserts two things
+between step 2 and step 3: a deterministic **Evidence Scout**, then a bounded exploration loop.
 
 ```
-collect-context ─► build-recon-prompt ─► ┌─ model turn ──┐ ─► build-synthesis-prompt
+collect-context ─► scout-search ─► scout-read ─► build-recon-prompt
+                   (deterministic, no model)              │
+                                                          ▼
+                                         ┌─ model turn ──┐ ─► build-synthesis-prompt
                                          │      ▲        │        │
                                          │      └─ tool ─┘        ▼
                                          └── ≤ maxTurns ──┘   synthesis-call
@@ -158,6 +180,57 @@ collect-context ─► build-recon-prompt ─► ┌─ model turn ──┐ ─
                                                      │
                                               ground-evidence
 ```
+
+### The Evidence Scout (Iteration 2)
+
+Iteration 1 gave the model a search tool and it used it **zero** times out of seven calls,
+picking filenames out of the directory tree instead. So search stopped being an option the model
+declines and became a phase that happens before the model gets a turn.
+
+Four modules in [`packages/shared/src/scout/`](../packages/shared/src/scout/), no model call in
+any of them:
+
+| Module | Responsibility |
+| --- | --- |
+| [`terms.ts`](../packages/shared/src/scout/terms.ts) | Text → a weighted, bounded, ordered list of search terms. |
+| [`lexicon.ts`](../packages/shared/src/scout/lexicon.ts) | Stop words, technical vocabulary, a small synonym table, concept seeds. |
+| [`rank.ts`](../packages/shared/src/scout/rank.ts) | Search hits → scored, ordered candidate files. |
+| [`scout.ts`](../packages/shared/src/scout/scout.ts) | The phase: search each term, dedupe, rank, read the top few, hand back artefacts. |
+
+**Term extraction** is a six-step pipeline — tokenize, drop stop words, keep tokens of three
+characters or more, detect adjacent compounds, apply the synonym table, sort by weight and break
+ties alphabetically. Weights encode where a term came from (`focusTechnical` 100 down to `seed`
+10), so the bound cuts the least-supported terms rather than an arbitrary tail. When nothing
+survives, `CONCEPT_SEEDS` supplies a fallback so the phase never silently no-ops.
+
+Adding a model call to generate search terms was explicitly rejected: it would have bought
+nondeterminism and per-run cost for something a stop-word list does.
+
+**Ranking** is additive and deterministic — extra matched terms, path-component matches, a
+source-file extension bonus, proximity of two terms within 20 lines, and a rarity bonus for
+matching a term few files matched. Ties break on path, so the same repository always yields the
+same order.
+
+**Reading** goes through the same `read_file` as the model's own calls: same boundary check, same
+line and byte limits, same `ledger.recordAll`. There is no privileged path into the ledger and
+no second door.
+
+Two properties are load-bearing and easy to lose:
+
+- **The scout is additive.** The reconnaissance prompt still carries tree, README, manifest and
+  metadata verbatim; scout evidence is appended as its own block. Iteration 1's one genuine loss
+  came from depth crowding out breadth, so the fix could not be another substitution.
+- **The scout sets a floor, not a ceiling.** The model keeps all three tools afterwards and is
+  told to search before guessing filenames. In the measured run it went on to read six more
+  files in `orders-api` and two more in `pyflow`.
+
+**Where terms come from depends on the caller.** With `--focus "<question>"` they are extracted
+from the question. Under evaluation there is no question — the harness never shows a system the
+questions it is scored on, and passing them would hand the advanced system an answer key the
+baseline never gets — so terms come from the repository's own documentation instead: README
+emphasis, manifest vocabulary, path components. Every measured number comes from that
+question-blind configuration, and the CLI rejects `--focus` on any command other than
+`advanced`.
 
 ### Two phases, because one turn cannot do both jobs
 
@@ -223,7 +296,7 @@ deterministic and makes a catastrophic-backtracking input impossible.
 
 ### The exploration budget
 
-Seven bounds, each settable by flag or environment variable, defaults in
+Ten bounds, each settable by flag or environment variable, defaults in
 [`tools/types.ts`](../packages/shared/src/tools/types.ts):
 
 | Bound | Default | Flag |
@@ -235,13 +308,29 @@ Seven bounds, each settable by flag or environment variable, defaults in
 | `maxFileBytes` | 24 000 | `--max-file-bytes` |
 | `maxListEntries` | 200 | `--max-list-entries` |
 | `maxListDepth` | 3 | `--max-list-depth` |
+| `maxScoutTerms` | 14 | `--max-scout-terms` |
+| `maxScoutSearches` | 14 | `--max-scout-searches` |
+| `maxScoutFiles` | 4 | `--max-scout-files` |
 
-Environment variables use the `REPO_ARCHAEOLOGIST_MAX_*` prefix. A budget of zero is rejected
-with a hint, since it would leave the agent unable to look at anything.
+Environment variables use the `REPO_ARCHAEOLOGIST_MAX_*` prefix.
+
+**Zero is accepted for the three scout bounds and rejected for the rest**, and the asymmetry is
+deliberate: `--max-scout-files 0` switches the search phase off, which is the control condition
+Iteration 2 has to be measurable against, and an experiment whose control is unreachable from the
+command line is not reproducible. `--max-tool-calls 0` is a different thing — it leaves the agent
+unable to look at anything at all. The two rejections carry different hints, and
+[a test](../packages/shared/test/config.test.ts) asserts they stay different.
+
+`maxScoutTerms: 14` is a measured default, not a taste. At 28 terms the extra low-weight terms
+pulled the ranking off the files that mattered on both fixtures, while runtime stayed flat across
+14 / 28 / 40 terms — so the bound is doing signal work, not cost work. The measurement is in
+[`improvement-changelog.md`](improvement-changelog.md).
 
 Exhausting the call budget does not silently drop the call. The loop returns an explicit error
 result to the model — `exploration budget exhausted … answer with what you have` — because an
-unanswered function call leaves the model waiting for a result that will never arrive.
+unanswered function call leaves the model waiting for a result that will never arrive. The
+refused call is still recorded as a `toolCall` step, because a `function_result` whose
+`function_call` is missing is a malformed turn rather than a shorter one.
 
 ### The trajectory
 
@@ -260,15 +349,38 @@ every write, so a credential in a tool result cannot reach a trajectory file, an
 ever recorded.
 
 `meta.exploration` carries the summary a reproduction needs: turns, tool calls, failures,
-`callsByTool`, `filesRead`, `bytesFromTools`, `budgetExhausted`, and the full budget the run
-used.
+`callsByTool`, `filesRead`, `bytesFromTools`, `budgetExhausted`, the full budget the run used,
+and `scout` — the phase's own counters (terms extracted, searches run, searches with a match,
+candidates ranked, files read, bytes read, candidates skipped).
 
-### What Iteration 1 measured
+`toolCalls` counts the **model's** calls only. The scout's are reported beside them rather than
+added in: its cost is fixed and declared while the model's budget is discretionary, and mixing
+the two would make "the agent explored more this iteration" unreadable from the numbers.
+`filesRead` and `bytesFromTools` do cover both, because the ledger does not distinguish them and
+neither does grounding — that count answers "how much of the repository was this briefing
+actually written from?"
 
-It regressed the primary metric: **64.3 % → 57.1 %**. The mechanism works — the grounding layer
-held with zero fabrications and zero dropped citations — but the agent used only `read_file`,
-never `search_code`, and traded several documentation citations for one implementation citation.
-Full numbers and diagnosis in [`improvement-changelog.md`](improvement-changelog.md).
+One known gap: the `scout-search` step records every candidate with its score, matched terms and
+reasons, but `truncateDetail` caps a serialized detail at 2 000 characters and both fixtures land
+just over it. The terms and top candidates survive, and everything reproducibility-critical is
+intact in `meta.exploration.scout` and the `scout-read` step, but a full audit of why a *losing*
+candidate lost is not always recoverable from the trajectory file. Documented as
+[limitation 11](evaluation.md#limitations) rather than fixed by raising a shared recorder's cap.
+
+### What Iterations 1 and 2 measured
+
+**Iteration 1 regressed the primary metric: 64.3 % → 57.1 %, and was rejected.** The mechanism
+worked — grounding held with zero fabrications — but the agent used only `read_file`, never
+`search_code`, and traded several documentation citations for one implementation citation.
+
+**Iteration 2 raised it to 85.7 %, and is kept.** Making search a deterministic phase rather than
+an option fixed the question that motivated both iterations: the term `dispatch`, drawn from the
+repository's own documentation, found `pyflow/steps/__init__.py`, the scout read it, and an answer
+that had failed twice became correct and cited. Answer accuracy reached 100 %, grounding held
+again at 31 of 31 citations, and cost rose 2.77×. Full numbers, the one remaining regression, and
+the reason mean evidence relevance fell while the primary metric rose are in
+[`improvement-changelog.md`](improvement-changelog.md).
+
 
 ---
 
@@ -357,6 +469,6 @@ surrounding JSON stays parseable. That case was found by a test, not by inspecti
 **Where the next system plugs in.** A new system implements the same
 `(repositoryPath, config) → RunRecord` contract and registers a system name in
 `EVALUABLE_SYSTEMS`. `runEvaluation` already takes `system` and already rejects an unknown one.
-Nothing in `packages/evaluator` needed to change to score Iteration 1 — no new evidence type, no
-new matching rule, no scoring exemption — which is the whole reason the harness was built first,
-and the reason its 57.1 % is worth believing.
+Nothing in `packages/evaluator` needed to change to score Iteration 1 or Iteration 2 — no new
+evidence type, no new matching rule, no scoring exemption — which is the whole reason the harness
+was built first, and the reason both the rejected 57.1 % and the kept 85.7 % are worth believing.

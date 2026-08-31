@@ -1,5 +1,8 @@
 import { ConfigError } from "./errors";
-import { DEFAULT_EXPLORATION_BUDGET, type ExplorationBudget } from "./tools/types";
+import {
+  DEFAULT_EXPLORATION_BUDGET,
+  type ExplorationBudget,
+} from "./tools/types";
 
 /**
  * Configuration is read from (in order of precedence):
@@ -50,7 +53,10 @@ export function loadDotEnv(): void {
   }
 }
 
-function parseNumber(raw: string | undefined, label: string): number | undefined {
+function parseNumber(
+  raw: string | undefined,
+  label: string,
+): number | undefined {
   if (raw === undefined || raw.trim() === "") return undefined;
   const value = Number(raw);
   if (!Number.isFinite(value)) {
@@ -59,7 +65,9 @@ function parseNumber(raw: string | undefined, label: string): number | undefined
   return value;
 }
 
-function parseThinkingLevel(raw: string | undefined): ThinkingLevel | undefined {
+function parseThinkingLevel(
+  raw: string | undefined,
+): ThinkingLevel | undefined {
   if (raw === undefined || raw.trim() === "") return undefined;
   if (raw === "low" || raw === "medium" || raw === "high") return raw;
   throw new ConfigError(
@@ -75,15 +83,30 @@ function parseProvider(raw: string | undefined): LlmProvider | undefined {
   );
 }
 
-export function loadConfig(overrides: ConfigOverrides = {}, env: NodeJS.ProcessEnv = process.env): AnalysisConfig {
-  const provider = overrides.provider ?? parseProvider(env.REPO_ARCHAEOLOGIST_PROVIDER) ?? "gemini";
-  const model = overrides.model ?? env.REPO_ARCHAEOLOGIST_MODEL ?? DEFAULT_MODEL;
-  const seed = overrides.seed ?? parseNumber(env.REPO_ARCHAEOLOGIST_SEED, "REPO_ARCHAEOLOGIST_SEED") ?? DEFAULT_SEED;
+export function loadConfig(
+  overrides: ConfigOverrides = {},
+  env: NodeJS.ProcessEnv = process.env,
+): AnalysisConfig {
+  const provider =
+    overrides.provider ??
+    parseProvider(env.REPO_ARCHAEOLOGIST_PROVIDER) ??
+    "gemini";
+  const model =
+    overrides.model ?? env.REPO_ARCHAEOLOGIST_MODEL ?? DEFAULT_MODEL;
+  const seed =
+    overrides.seed ??
+    parseNumber(env.REPO_ARCHAEOLOGIST_SEED, "REPO_ARCHAEOLOGIST_SEED") ??
+    DEFAULT_SEED;
   const thinkingLevel =
-    overrides.thinkingLevel ?? parseThinkingLevel(env.REPO_ARCHAEOLOGIST_THINKING_LEVEL) ?? "low";
+    overrides.thinkingLevel ??
+    parseThinkingLevel(env.REPO_ARCHAEOLOGIST_THINKING_LEVEL) ??
+    "low";
   const maxOutputTokens =
     overrides.maxOutputTokens ??
-    parseNumber(env.REPO_ARCHAEOLOGIST_MAX_OUTPUT_TOKENS, "REPO_ARCHAEOLOGIST_MAX_OUTPUT_TOKENS") ??
+    parseNumber(
+      env.REPO_ARCHAEOLOGIST_MAX_OUTPUT_TOKENS,
+      "REPO_ARCHAEOLOGIST_MAX_OUTPUT_TOKENS",
+    ) ??
     DEFAULT_MAX_OUTPUT_TOKENS;
 
   const apiKey = env.GEMINI_API_KEY?.trim() || undefined;
@@ -106,7 +129,9 @@ export function loadConfig(overrides: ConfigOverrides = {}, env: NodeJS.ProcessE
 }
 
 /** A view of the config that is safe to print or serialise. */
-export function describeConfig(config: AnalysisConfig): Record<string, unknown> {
+export function describeConfig(
+  config: AnalysisConfig,
+): Record<string, unknown> {
   return {
     provider: config.provider,
     model: config.model,
@@ -129,7 +154,9 @@ export function describeConfig(config: AnalysisConfig): Record<string, unknown> 
  * Every limit is overridable, because the right ceiling depends on the repository
  * and because a hardcoded budget is a hidden variable in an experiment.
  */
-export type ExplorationBudgetOverrides = Partial<Record<keyof ExplorationBudget, number | undefined>>;
+export type ExplorationBudgetOverrides = Partial<
+  Record<keyof ExplorationBudget, number | undefined>
+>;
 
 const BUDGET_ENV_VARS: Record<keyof ExplorationBudget, string> = {
   maxToolCalls: "REPO_ARCHAEOLOGIST_MAX_TOOL_CALLS",
@@ -139,7 +166,25 @@ const BUDGET_ENV_VARS: Record<keyof ExplorationBudget, string> = {
   maxFileBytes: "REPO_ARCHAEOLOGIST_MAX_FILE_BYTES",
   maxListEntries: "REPO_ARCHAEOLOGIST_MAX_LIST_ENTRIES",
   maxListDepth: "REPO_ARCHAEOLOGIST_MAX_LIST_DEPTH",
+  maxScoutTerms: "REPO_ARCHAEOLOGIST_MAX_SCOUT_TERMS",
+  maxScoutSearches: "REPO_ARCHAEOLOGIST_MAX_SCOUT_SEARCHES",
+  maxScoutFiles: "REPO_ARCHAEOLOGIST_MAX_SCOUT_FILES",
 };
+
+/**
+ * Limits the scout may legitimately be given as zero.
+ *
+ * Zero tool calls or zero turns would leave the agent unable to look at anything, so
+ * those stay at one or more. A zero scout budget is different: it is the control
+ * condition for iteration 2's experiment — the same system with the search phase
+ * switched off — and an experiment whose control is unreachable from the command line
+ * is not reproducible.
+ */
+const ZERO_ALLOWED: ReadonlySet<keyof ExplorationBudget> = new Set([
+  "maxScoutTerms",
+  "maxScoutSearches",
+  "maxScoutFiles",
+]);
 
 export function loadExplorationBudget(
   overrides: ExplorationBudgetOverrides = {},
@@ -147,14 +192,24 @@ export function loadExplorationBudget(
 ): ExplorationBudget {
   const budget = { ...DEFAULT_EXPLORATION_BUDGET };
 
-  for (const key of Object.keys(BUDGET_ENV_VARS) as Array<keyof ExplorationBudget>) {
+  for (const key of Object.keys(BUDGET_ENV_VARS) as Array<
+    keyof ExplorationBudget
+  >) {
     const variable = BUDGET_ENV_VARS[key];
-    const value = overrides[key] ?? parseNumber(env[variable], variable);
+    const fromEnv = parseNumber(env[variable], variable);
+    const value = overrides[key] ?? fromEnv;
     if (value === undefined) continue;
-    if (!Number.isInteger(value) || value < 1) {
+    const minimum = ZERO_ALLOWED.has(key) ? 0 : 1;
+    if (!Number.isInteger(value) || value < minimum) {
+      // Name whichever source the value actually came from, so the message points at
+      // the thing the caller would have to change.
+      const source =
+        overrides[key] === undefined ? variable : `--${kebabCase(key)}`;
       throw new ConfigError(
-        `${variable} must be a positive whole number, received "${String(value)}".`,
-        "A budget of zero would make the agent unable to look at anything.",
+        `${source} must be a whole number of ${minimum} or more, received "${String(value)}".`,
+        minimum === 1
+          ? "A budget of zero would make the agent unable to look at anything."
+          : "Zero switches the evidence scout off, which is a valid experiment control; negatives are not.",
       );
     }
     budget[key] = value;
@@ -163,3 +218,7 @@ export function loadExplorationBudget(
   return budget;
 }
 
+/** `maxScoutFiles` -> `max-scout-files`, to name the flag a caller actually typed. */
+function kebabCase(key: string): string {
+  return key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
+}

@@ -62,6 +62,27 @@ export interface ExplorationBudget {
   maxListEntries: number;
   /** Cap on `depth` accepted by `list_directory`, whatever the model asks for. */
   maxListDepth: number;
+
+  /*
+   * The Evidence Scout's own bounds.
+   *
+   * Kept separate from `maxToolCalls` on purpose. That budget is the *model's*
+   * licence to explore, and spending it on the scout would mean the advanced system
+   * measured in Iteration 2 had less room to explore than the one measured in
+   * Iteration 1 — a second change riding along with the one under test. The scout's
+   * cost is fixed, declared up front, and reported separately.
+   *
+   * The asymmetry between the three is deliberate: a search costs a filesystem walk
+   * and no tokens, so searching widely is nearly free. A read costs prompt bytes on
+   * every subsequent turn, so reads are what must stay scarce.
+   */
+
+  /** Cap on search terms extracted from the question and the repository. */
+  maxScoutTerms: number;
+  /** Cap on `search_code` calls the scout may make. */
+  maxScoutSearches: number;
+  /** Cap on files the scout may read. Worst case adds `maxScoutFiles × maxFileBytes` to the prompt. */
+  maxScoutFiles: number;
 }
 
 export const DEFAULT_EXPLORATION_BUDGET: ExplorationBudget = {
@@ -72,6 +93,9 @@ export const DEFAULT_EXPLORATION_BUDGET: ExplorationBudget = {
   maxFileBytes: 24_000,
   maxListEntries: 200,
   maxListDepth: 3,
+  maxScoutTerms: 14,
+  maxScoutSearches: 14,
+  maxScoutFiles: 4,
 };
 
 export interface ToolContext {

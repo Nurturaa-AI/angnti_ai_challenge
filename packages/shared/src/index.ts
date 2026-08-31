@@ -9,5 +9,6 @@ export * from "./paths";
 export * from "./render";
 export * from "./repo";
 export * from "./schemas";
+export * from "./scout";
 export * from "./tools";
 export * from "./trajectory";
