@@ -5,13 +5,13 @@ import {
   ModelError,
   RepositoryError,
   SchemaError,
+  renderBriefingMarkdown,
   type AnalysisConfig,
   type LlmClient,
   type StructuredRequest,
 } from "@repo-arch/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BASELINE_SYSTEM_NAME, buildRunId, runBaseline } from "../src/index";
-import { renderBriefingMarkdown } from "../src/render";
 
 /**
  * The baseline, end to end, with the model replaced by a stub.

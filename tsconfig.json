@@ -19,5 +19,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["apps", "baseline", "evaluation", "packages", "scripts", "vitest.config.ts"]
+  "include": ["advanced", "apps", "baseline", "evaluation", "packages", "scripts", "vitest.config.ts"]
 }

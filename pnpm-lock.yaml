@@ -21,8 +21,24 @@ importers:
         specifier: ^4.1.11
         version: 4.1.11(@types/node@22.20.1)(vite@8.2.2(@types/node@22.20.1)(esbuild@0.28.2)(tsx@4.23.13))
 
+  advanced:
+    dependencies:
+      '@repo-arch/shared':
+        specifier: workspace:*
+        version: link:../packages/shared
+      zod:
+        specifier: ^4.5.4
+        version: 4.5.4
+    devDependencies:
+      '@repo-arch/evaluator':
+        specifier: workspace:*
+        version: link:../packages/evaluator
+
   apps/cli:
     dependencies:
+      '@repo-arch/advanced':
+        specifier: workspace:*
+        version: link:../../advanced
       '@repo-arch/baseline':
         specifier: workspace:*
         version: link:../../baseline
@@ -44,6 +60,9 @@ importers:
 
   evaluation:
     dependencies:
+      '@repo-arch/advanced':
+        specifier: workspace:*
+        version: link:../advanced
       '@repo-arch/baseline':
         specifier: workspace:*
         version: link:../baseline

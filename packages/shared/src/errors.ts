@@ -37,6 +37,16 @@ export class SchemaError extends RepoArchaeologistError {
 export class EvaluationError extends RepoArchaeologistError {}
 
 /**
+ * A tool call the agent asked for cannot be honoured: unknown tool, invalid
+ * arguments, or a path outside the repository.
+ *
+ * Unlike the errors above this one is usually *not* fatal. The agent loop turns
+ * it into a tool result the model can read and correct, so a bad call costs one
+ * step of the exploration budget instead of the whole run.
+ */
+export class ToolError extends RepoArchaeologistError {}
+
+/**
  * Render an error for the terminal: message, hint, and schema issues if any.
  * Never includes a stack trace for our own error types — they are user-facing.
  */

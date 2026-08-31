@@ -1,4 +1,5 @@
 import { ConfigError } from "./errors";
+import { DEFAULT_EXPLORATION_BUDGET, type ExplorationBudget } from "./tools/types";
 
 /**
  * Configuration is read from (in order of precedence):
@@ -115,3 +116,50 @@ export function describeConfig(config: AnalysisConfig): Record<string, unknown> 
     apiKey: config.apiKey ? "<set, redacted>" : "<unset>",
   };
 }
+
+// ---------------------------------------------------------------------------
+// Exploration budget: how much the agent is allowed to look at.
+// ---------------------------------------------------------------------------
+
+/**
+ * Kept separate from `AnalysisConfig` on purpose. That one describes the model;
+ * this one describes the agent's licence to read the repository. A system that
+ * does not explore never needs to construct one.
+ *
+ * Every limit is overridable, because the right ceiling depends on the repository
+ * and because a hardcoded budget is a hidden variable in an experiment.
+ */
+export type ExplorationBudgetOverrides = Partial<Record<keyof ExplorationBudget, number | undefined>>;
+
+const BUDGET_ENV_VARS: Record<keyof ExplorationBudget, string> = {
+  maxToolCalls: "REPO_ARCHAEOLOGIST_MAX_TOOL_CALLS",
+  maxTurns: "REPO_ARCHAEOLOGIST_MAX_TURNS",
+  maxSearchResults: "REPO_ARCHAEOLOGIST_MAX_SEARCH_RESULTS",
+  maxFileLines: "REPO_ARCHAEOLOGIST_MAX_FILE_LINES",
+  maxFileBytes: "REPO_ARCHAEOLOGIST_MAX_FILE_BYTES",
+  maxListEntries: "REPO_ARCHAEOLOGIST_MAX_LIST_ENTRIES",
+  maxListDepth: "REPO_ARCHAEOLOGIST_MAX_LIST_DEPTH",
+};
+
+export function loadExplorationBudget(
+  overrides: ExplorationBudgetOverrides = {},
+  env: NodeJS.ProcessEnv = process.env,
+): ExplorationBudget {
+  const budget = { ...DEFAULT_EXPLORATION_BUDGET };
+
+  for (const key of Object.keys(BUDGET_ENV_VARS) as Array<keyof ExplorationBudget>) {
+    const variable = BUDGET_ENV_VARS[key];
+    const value = overrides[key] ?? parseNumber(env[variable], variable);
+    if (value === undefined) continue;
+    if (!Number.isInteger(value) || value < 1) {
+      throw new ConfigError(
+        `${variable} must be a positive whole number, received "${String(value)}".`,
+        "A budget of zero would make the agent unable to look at anything.",
+      );
+    }
+    budget[key] = value;
+  }
+
+  return budget;
+}
+

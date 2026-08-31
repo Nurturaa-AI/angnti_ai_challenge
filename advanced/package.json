@@ -1,0 +1,17 @@
+{
+  "name": "@repo-arch/advanced",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Advanced system, iteration 1: shallow reconnaissance, then targeted repository exploration with search_code / read_file / list_directory, grounded against what the tools actually returned.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@repo-arch/shared": "workspace:*",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@repo-arch/evaluator": "workspace:*"
+  }
+}

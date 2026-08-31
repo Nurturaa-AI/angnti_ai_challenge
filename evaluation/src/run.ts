@@ -1,4 +1,5 @@
 import path from "node:path";
+import { ADVANCED_SYSTEM_NAME, ADVANCED_VERSION, runAdvanced } from "@repo-arch/advanced";
 import {
   BASELINE_SYSTEM_NAME,
   BASELINE_VERSION,
@@ -18,10 +19,12 @@ import {
   EvaluationError,
   createLlmClient,
   formatError,
+  loadExplorationBudget,
   timestampSlug,
   writeJsonFile,
   writeTextFile,
   type AnalysisConfig,
+  type ExplorationBudget,
   type LlmClient,
   type RunRecord,
 } from "@repo-arch/shared";
@@ -34,15 +37,27 @@ import {
  * for each case is produced *blind* — the analyzer never sees the questions — so
  * the harness measures understanding rather than test-taking.
  *
- * Only the baseline exists today. `system` is a parameter rather than a hard-coded
- * call so the advanced agent can be dropped in without touching the scoring path.
+ * Both systems run through this same path: the same cases, the same scorer, the
+ * same report. `runSystem` is the only place that knows which one is executing,
+ * and everything downstream of it — scoring, aggregation, rendering — is handed a
+ * `RunRecord` with no indication of where it came from. That is what keeps the
+ * comparison honest: the evaluator cannot score the advanced system differently,
+ * because it cannot tell.
  */
 
 export const DEFAULT_CASES_DIR = "evaluation/cases";
 export const DEFAULT_RESULTS_DIR = "evaluation/results";
 
+/** Systems this harness can run. Adding one means adding a branch in `runSystem`. */
+export const EVALUABLE_SYSTEMS = [BASELINE_SYSTEM_NAME, ADVANCED_SYSTEM_NAME] as const;
+
+const SYSTEM_VERSIONS: Record<string, string> = {
+  [BASELINE_SYSTEM_NAME]: BASELINE_VERSION,
+  [ADVANCED_SYSTEM_NAME]: ADVANCED_VERSION,
+};
+
 export interface EvaluationRunOptions {
-  /** Which system to evaluate. Only "baseline" is implemented. */
+  /** Which system to evaluate: "baseline" or "advanced". */
   system?: string;
   casesDir?: string;
   resultsDir?: string;
@@ -53,6 +68,13 @@ export interface EvaluationRunOptions {
   client?: LlmClient;
   /** Restrict the run to specific case ids. */
   caseIds?: readonly string[];
+  /** Exploration limits for the advanced system. Ignored by the baseline. */
+  budget?: ExplorationBudget;
+  /**
+   * Seconds to wait between cases. Zero by default; raise it when a provider's
+   * per-minute quota is the binding constraint rather than the model.
+   */
+  caseDelaySeconds?: number;
   now?: () => Date;
   /** Progress sink. Defaults to silence, so library use prints nothing. */
   logger?: (message: string) => void;
@@ -68,10 +90,10 @@ export interface EvaluationRunOutput {
 
 export async function runEvaluation(options: EvaluationRunOptions): Promise<EvaluationRunOutput> {
   const system = options.system ?? BASELINE_SYSTEM_NAME;
-  if (system !== BASELINE_SYSTEM_NAME) {
+  if (!(EVALUABLE_SYSTEMS as readonly string[]).includes(system)) {
     throw new EvaluationError(
       `Unknown system "${system}".`,
-      `Only "${BASELINE_SYSTEM_NAME}" is implemented so far.`,
+      `Available systems: ${EVALUABLE_SYSTEMS.join(", ")}.`,
     );
   }
 
@@ -89,11 +111,17 @@ export async function runEvaluation(options: EvaluationRunOptions): Promise<Eval
   // One client for the whole run, so token usage and cost accumulate against a
   // single provider/model pair rather than a per-case guess.
   const client = options.client ?? createLlmClient(options.config);
+  const budget = options.budget ?? loadExplorationBudget();
+  const caseDelayMs = Math.max(options.caseDelaySeconds ?? 0, 0) * 1_000;
 
   const scores: CaseScore[] = [];
   for (const [index, entry] of loaded.entries()) {
+    if (index > 0 && caseDelayMs > 0) {
+      log(`    waiting ${caseDelayMs / 1_000}s before the next case`);
+      await delay(caseDelayMs);
+    }
     log(`[${index + 1}/${loaded.length}] ${entry.case.id} — ${entry.case.repository}`);
-    const score = await evaluateCase(entry, { ...options, client, now, system });
+    const score = await evaluateCase(entry, { ...options, client, now, system, budget });
     scores.push(score);
     log(
       score.error === undefined
@@ -106,7 +134,7 @@ export async function runEvaluation(options: EvaluationRunOptions): Promise<Eval
   const report = aggregate({
     runId,
     system,
-    systemVersion: BASELINE_VERSION,
+    systemVersion: SYSTEM_VERSIONS[system] ?? "unknown",
     provider: client.provider,
     model: client.model,
     seed: options.config.seed,
@@ -135,18 +163,32 @@ interface CaseRunContext extends EvaluationRunOptions {
   client: LlmClient;
   now: () => Date;
   system: string;
+  budget: ExplorationBudget;
+}
+
+/**
+ * The only branch on system identity in the whole harness.
+ *
+ * Both branches return a `RunRecord` and nothing downstream inspects `meta.system`
+ * when scoring, so neither system can be scored on different terms from the other.
+ */
+function runSystem(entry: LoadedCase, context: CaseRunContext): Promise<RunRecord> {
+  const shared = {
+    repositoryPath: entry.case.repository,
+    config: context.config,
+    client: context.client,
+    now: context.now,
+  };
+  return context.system === ADVANCED_SYSTEM_NAME
+    ? runAdvanced({ ...shared, budget: context.budget })
+    : runBaseline(shared);
 }
 
 async function evaluateCase(entry: LoadedCase, context: CaseRunContext): Promise<CaseScore> {
   const startedAt = context.now().getTime();
   let record: RunRecord;
   try {
-    record = await runBaseline({
-      repositoryPath: entry.case.repository,
-      config: context.config,
-      client: context.client,
-      now: context.now,
-    });
+    record = await runSystem(entry, context);
   } catch (error) {
     // A crash is a result, not an excuse to shrink the denominator.
     return failedCase(entry.case, formatError(error), context.now().getTime() - startedAt);
@@ -175,4 +217,10 @@ function buildCaveats(client: LlmClient, loaded: readonly LoadedCase[]): string[
     );
   }
   return caveats;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }

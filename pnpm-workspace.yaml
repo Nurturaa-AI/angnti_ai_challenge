@@ -2,4 +2,5 @@ packages:
   - apps/*
   - packages/*
   - baseline
+  - advanced
   - evaluation

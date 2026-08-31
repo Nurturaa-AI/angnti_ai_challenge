@@ -34,7 +34,12 @@ export const DEFAULT_COLLECT_OPTIONS = {
 /** Hard ceiling on traversal, so a pathological repository cannot hang a run. */
 const MAX_WALK_ENTRIES = 20_000;
 
-const IGNORED_DIRECTORIES = new Set([
+/**
+ * Directories that are generated, vendored or VCS internals. Never walked, never
+ * searched, never listed. Shared with the exploration tools so that reconnaissance
+ * and targeted search agree on what counts as repository source.
+ */
+export const IGNORED_DIRECTORIES = new Set([
   ".git",
   ".hg",
   ".svn",

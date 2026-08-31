@@ -8,6 +8,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@repo-arch/advanced": "workspace:*",
     "@repo-arch/baseline": "workspace:*",
     "@repo-arch/evaluator": "workspace:*",
     "@repo-arch/shared": "workspace:*",

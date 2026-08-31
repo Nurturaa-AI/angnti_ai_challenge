@@ -172,19 +172,39 @@ reproducible — which matters for a later agent that reads history.
 ## Running it
 
 ```sh
-pnpm evaluate:baseline                          # every case
+pnpm evaluate:baseline                          # every case, baseline system
+pnpm evaluate:advanced                          # every case, exploring agent
 pnpm evaluate:baseline --mock                   # offline, deterministic, no cost
 pnpm evaluate:baseline --case case-001-orders-api
 pnpm evaluate:baseline --cases ./my-cases --out ./my-results
+pnpm evaluate:advanced -- --model gemini-3.5-flash-lite --case-delay 25
 ```
 
 Output in [`evaluation/results/`](../evaluation/results/): a timestamped JSON report, a
-timestamped Markdown summary, and a stable `latest-baseline.{json,md}` pair.
+timestamped Markdown summary, and a stable `latest-<system>.{json,md}` pair. The two systems
+write to separate `latest-` files, so a comparison never depends on remembering which run
+happened last.
 
 The report records total cases, passed cases (all questions correct), fully-cited cases,
 failed cases, total questions, correct answers, evidence-backed answers, partial-evidence
 answers, unsupported answers, fabrications, dropped citations, average evidence relevance,
 runtime, token usage, estimated cost, and the full per-question breakdown.
+
+### The evaluator cannot tell the systems apart
+
+This is the property that makes a comparison mean anything, so it is worth stating as a rule
+rather than an aspiration: **`runSystem` is the only code in the repository that branches on
+system identity.** Everything downstream receives a `RunRecord` and has no way to learn which
+system produced it — no flag, no version check, no heuristic on the evidence types present.
+
+Scoring Iteration 1 required **no** change to `packages/evaluator`: no new evidence type, no
+new matching rule, no threshold adjustment, no exemption. The `file` evidence type a tool
+produces was already in `CONTENT_TYPES` because the schema always allowed it. If the advanced
+system's number had required touching the scorer to obtain, the number would not have been
+worth reporting.
+
+For the same reason, `--case-delay` and the retry backoff apply identically to both systems. A
+harness more patient with one of them would be measuring its own retry loop.
 
 ### Determinism
 
@@ -211,18 +231,52 @@ there would read as free.
 
 ## Current results
 
-**None yet.** No evaluation run against a real model has been executed, so there is no
-baseline number to report and nothing here claims the results are good.
+Both systems, same 14 questions, same model, same seed, same thinking level, same evaluator.
+Neither run had a failed case.
 
-The pipeline has been verified end to end with the offline mock provider: both cases load,
-both produce a schema-valid briefing, every citation is verified, both artefacts are written,
-and the totals are arithmetically consistent. Those scores measure the harness and the canned
-mock text — **not any model** — and the runner stamps every mock report with a caveat saying
-so in the report itself.
+| | Baseline | Advanced (Iteration 1) |
+| --- | --- | --- |
+| Run id | `eval-baseline-2026-08-31T00-01-17Z` | `eval-advanced-2026-08-31T00-11-08Z` |
+| **Evidence-backed task accuracy** | **64.3 % (9/14)** | **57.1 % (8/14)** |
+| Answer accuracy | 85.7 % (12/14) | 85.7 % (12/14) |
+| Partial-evidence answers | 0 | 0 |
+| Unsupported answers | 2 | 1 |
+| Fabrications | 0 | 0 |
+| Briefing unsupported claims | 0 | 0 |
+| Dropped citations | 0 | 0 |
+| Mean evidence relevance | 0.85 | 0.68 |
+| Tokens | 2 450 in / 4 480 out | 39 088 in / 5 292 out |
+| Cost | $0.011935 | $0.024957 |
+| Wall clock | 33.6 s | 53.8 s |
 
-To produce a real result: set `GEMINI_API_KEY` in `.env` and run `pnpm evaluate:baseline`.
-The first real number is the baseline, whatever it turns out to be, and it should be recorded
-in `CHANGELOG.md` alongside the model id and seed that produced it.
+Model `gemini-3.5-flash-lite`, seed 7, thinking level `low`, provider `gemini`. Commands:
+
+```sh
+pnpm evaluate:baseline -- --model gemini-3.5-flash-lite --case-delay 20
+pnpm evaluate:advanced -- --model gemini-3.5-flash-lite --case-delay 25
+```
+
+**Iteration 1 regressed the primary metric by 7.1 points and cost 2.1× as much.** Under the
+pre-stated decision rule it is rejected as an improvement. The per-question decomposition, the
+two distinct causes, and the reason the dataset is *not* being adjusted to rescue the result are
+in [`improvement-changelog.md`](improvement-changelog.md).
+
+Read these numbers with caveat 1 below firmly in mind: on a 14-question dataset a 7.1-point
+move **is one question**. The regression is real and it is what the run produced, but its
+magnitude is at the resolution limit of the dataset. What deserves more weight than the
+percentage is the *mechanism* the per-question breakdown exposes — the agent never called
+`search_code`, and it substituted one implementation citation for several documentation
+citations. Those are structural findings, and they would not change if the dataset were ten
+times larger.
+
+One result here needs no caveat: **zero fabrications and zero dropped citations on both
+systems.** Every citation the exploring agent made verified against bytes a tool had actually
+returned. That is the property that had to hold before file access could be trusted at all.
+
+An earlier pair of runs on `gemini-3.7-flash` is **not** reported here: that model's free-tier
+quota was exhausted mid-run, and the resulting failures were provider artefacts rather than
+model quality. Both systems were re-run on a model with quota headroom so the comparison stays
+like-for-like.
 
 <a name="limitations"></a>
 ## Limitations
@@ -249,9 +303,22 @@ accident.
    questions in the dataset expect evidence from a source file the baseline never opens. Its
    ceiling on those is `partialEvidence`. This is intentional headroom, not an oversight — but
    it means the baseline's score is not a measure of "how good is an LLM at reading code".
-7. **Fixture repositories are synthetic.** They were written to have the properties the cases
+7. **`expectedEvidence` lists only what the baseline could see.** This is the limitation
+   Iteration 1 exposed, and it is the most serious one. Each question's expected-evidence list
+   was written when reconnaissance context was all any system had, so it names READMEs and
+   manifests. A system that answers correctly while citing the *implementation* — `pipeline.py`
+   for the topological sort, rather than the README sentence describing it — is scored as not
+   evidence-backed. It is penalised for citing the source of truth.
+
+   Three of Iteration 1's four regressions are this artefact rather than worse analysis.
+   Widening the lists is the obvious fix and it is deliberately **not** being applied
+   retroactively: adjusting `expectedEvidence` after seeing which files the advanced system
+   chose would be fitting the ruler to the result, and would make every subsequent number
+   unfalsifiable. The fix belongs to a future iteration, pre-registered and re-run against both
+   systems, with the old numbers left standing.
+8. **Fixture repositories are synthetic.** They were written to have the properties the cases
    test. Real repositories are messier, larger, and less tidily documented; scores here are an
    upper bound on what to expect in the wild.
-8. **`passedCases` is all-or-nothing.** A case where six of seven questions are right counts
+9. **`passedCases` is all-or-nothing.** A case where six of seven questions are right counts
    as not passed. It is a deliberately harsh secondary figure; the primary metric is the
    per-question one.

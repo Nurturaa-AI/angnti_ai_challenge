@@ -140,4 +140,6 @@ export function buildRunId(repositoryName: string, at: Date): string {
 }
 
 export { ANALYSIS_RESPONSE_SCHEMA, BASELINE_SYSTEM_INSTRUCTION, buildBaselinePrompt } from "./prompt";
-export { renderBriefingMarkdown } from "./render";
+// Re-exported for callers that already import the renderer from here. It now lives
+// in `shared` because both systems produce the `RunRecord` it renders.
+export { renderBriefingMarkdown } from "@repo-arch/shared";

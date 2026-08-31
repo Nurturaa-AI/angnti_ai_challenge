@@ -199,8 +199,44 @@ export const TrajectoryStepSchema = z.object({
   action: z.string(),
   detail: z.unknown().optional(),
   durationMs: z.number().min(0).optional(),
+
+  // ---- Tool-use fields. Present only on steps that called a tool, and written
+  // only by the harness from the real call and the real result — never copied
+  // from model text. `toolResult` is what the tool returned, truncated and
+  // redacted; it is the audit trail that makes an invented result detectable.
+  tool: z.string().optional(),
+  toolArgs: z.unknown().optional(),
+  toolResult: z.string().optional(),
+  /** False when the tool rejected the call. */
+  ok: z.boolean().optional(),
+  /** Token usage attributable to this step, when the provider reports it. */
+  usage: TokenUsageSchema.optional(),
 });
 export type TrajectoryStep = z.infer<typeof TrajectoryStepSchema>;
+
+/**
+ * What the exploration actually cost and produced. Absent on systems that do not
+ * explore, which is why every field lives under one optional object rather than
+ * being sprinkled across `RunMeta`.
+ */
+export const ExplorationSummarySchema = z.object({
+  /** Model round trips, including the final synthesis call. */
+  turns: z.number().int().min(0),
+  toolCalls: z.number().int().min(0),
+  /** Calls the tool layer rejected: bad arguments, missing path, outside the repository. */
+  failedToolCalls: z.number().int().min(0),
+  /** Per-tool counts, e.g. `{ search_code: 3, read_file: 4 }`. */
+  callsByTool: z.record(z.string(), z.number().int().min(0)).default({}),
+  /** Files whose content entered the evidence ledger. */
+  filesRead: z.array(z.string()).default([]),
+  /** Bytes of repository content obtained by tools, over and above the base context. */
+  bytesFromTools: z.number().int().min(0),
+  /** True when the agent stopped because it ran out of budget rather than because it was done. */
+  budgetExhausted: z.boolean(),
+  /** The limits this run operated under, so a result can be reproduced. */
+  budget: z.record(z.string(), z.number()),
+});
+export type ExplorationSummary = z.infer<typeof ExplorationSummarySchema>;
 
 export const RunMetaSchema = z.object({
   runId: z.string(),
@@ -220,6 +256,8 @@ export const RunMetaSchema = z.object({
   contextSources: z.array(ContextSourceSchema).default([]),
   evidenceAudit: EvidenceAuditSchema,
   nodeVersion: z.string(),
+  /** Present only for systems that explore the repository with tools. */
+  exploration: ExplorationSummarySchema.optional(),
 });
 export type RunMeta = z.infer<typeof RunMetaSchema>;
 

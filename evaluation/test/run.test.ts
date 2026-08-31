@@ -1,8 +1,16 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { EvaluationError, type AnalysisConfig, type LlmClient, type StructuredRequest } from "@repo-arch/shared";
+import {
+  DEFAULT_EXPLORATION_BUDGET,
+  EvaluationError,
+  type AnalysisConfig,
+  type ExplorationBudget,
+  type LlmClient,
+  type StructuredRequest,
+  type ToolTurnRequest,
+} from "@repo-arch/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { runEvaluation } from "../src/run";
+import { EVALUABLE_SYSTEMS, runEvaluation } from "../src/run";
 
 /**
  * The evaluation runner, end to end, with the model stubbed.
@@ -75,6 +83,77 @@ function stubClient(): LlmClient & { readonly requests: StructuredRequest[] } {
 
 function writeCase(name: string, value: unknown): void {
   writeFileSync(path.join(casesDir, name), JSON.stringify(value, null, 2), "utf8");
+}
+
+/**
+ * A stub that explores before it answers, so the advanced system's own path
+ * through this harness is exercised without a network call.
+ *
+ * It reads `package.json` and then cites a verbatim excerpt from it. That makes
+ * the resulting citation groundable for real — the excerpt has to survive
+ * verification against the bytes `read_file` actually returned — so a scoring
+ * result here means the tool-derived evidence genuinely reached the evaluator.
+ */
+function toolStubClient(): LlmClient & { readonly toolRequests: ToolTurnRequest[] } {
+  const toolRequests: ToolTurnRequest[] = [];
+  const briefing = {
+    summary: "A demo HTTP service built on express.",
+    architecture: "A single express process.",
+    components: [],
+    flows: [],
+    dependencies: [
+      {
+        name: "express",
+        version: "^4.19.2",
+        scope: "runtime",
+        evidence: [
+          {
+            type: "file",
+            source: "package.json",
+            location: "L1",
+            excerpt: '"express": "^4.19.2"',
+            supports: "express is a declared runtime dependency.",
+          },
+        ],
+      },
+    ],
+    testing: { approach: "No test suite is visible.", frameworks: [], testPaths: [], gaps: [], evidence: [] },
+    risks: [],
+    recommendedReading: [],
+    confidence: 0.4,
+    evidence: [],
+    openQuestions: [],
+  };
+
+  return {
+    provider: "mock",
+    model: "stub-v1",
+    toolRequests,
+    generateStructured() {
+      return Promise.reject(new Error("the advanced system should not use the single-shot path"));
+    },
+    generateWithTools(request) {
+      toolRequests.push(request);
+      const usage = { inputTokens: 100, outputTokens: 40, totalTokens: 140 };
+      if (request.schema) {
+        return Promise.resolve({
+          text: JSON.stringify(briefing),
+          toolCalls: [],
+          providerSteps: [],
+          model: "stub-v1",
+          usage,
+        });
+      }
+      const alreadyRead = request.steps.some((step) => step.kind === "toolResult");
+      return Promise.resolve({
+        text: alreadyRead ? "I have the manifest; that is enough." : "",
+        toolCalls: alreadyRead ? [] : [{ id: "c1", name: "read_file", arguments: { path: "package.json" } }],
+        providerSteps: [],
+        model: "stub-v1",
+        usage,
+      });
+    },
+  };
 }
 
 function demoCase(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -280,5 +359,167 @@ describe("runEvaluation", () => {
     await expect(runEvaluation({ config, client: stubClient(), casesDir, resultsDir, now })).rejects.toThrow(
       /No evaluation cases found/,
     );
+  });
+});
+
+/**
+ * The advanced system through the *same* harness.
+ *
+ * These tests exist to hold one line: the evaluator does not know, and cannot be
+ * told, which system produced a run record. So they check that the advanced path
+ * is dispatched, labelled and budgeted — and that nothing about scoring changed
+ * to accommodate it.
+ */
+describe("runEvaluation --system advanced", () => {
+  const budget: ExplorationBudget = { ...DEFAULT_EXPLORATION_BUDGET, maxToolCalls: 4, maxTurns: 4 };
+
+  it("offers both systems, so one command can produce a comparable pair", () => {
+    expect([...EVALUABLE_SYSTEMS]).toEqual(["baseline", "advanced"]);
+  });
+
+  it("runs the advanced system and labels the report as such", async () => {
+    writeCase("case-001.json", demoCase());
+
+    const { report } = await runEvaluation({
+      config,
+      client: toolStubClient(),
+      casesDir,
+      resultsDir,
+      now,
+      system: "advanced",
+      budget,
+    });
+
+    expect(report.runId).toMatch(/^eval-advanced-/);
+    expect(report.system).toBe("advanced");
+    // A version, so two advanced runs months apart are distinguishable.
+    expect(report.systemVersion).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  it("scores tool-derived evidence with the unmodified scorer", async () => {
+    writeCase("case-001.json", demoCase());
+
+    const { report } = await runEvaluation({
+      config,
+      client: toolStubClient(),
+      casesDir,
+      resultsDir,
+      now,
+      system: "advanced",
+      budget,
+    });
+
+    const question = report.cases[0]?.questions[0];
+    expect(question?.answerCorrect).toBe(true);
+    // The citation is a file the agent read during exploration, and it verified.
+    expect(question?.evidenceBacked).toBe(true);
+    expect(question?.evidenceStrength).toBe("content");
+    expect(report.metrics.droppedCitations).toBe(0);
+  });
+
+  it("uses the exploring path, not the single-shot one", async () => {
+    writeCase("case-001.json", demoCase());
+    const client = toolStubClient();
+
+    await runEvaluation({ config, client, casesDir, resultsDir, now, system: "advanced", budget });
+
+    // Explore, explore-again-after-the-result, then synthesise.
+    expect(client.toolRequests).toHaveLength(3);
+    expect(client.toolRequests[0]?.tools.map((tool) => tool.name)).toEqual([
+      "search_code",
+      "read_file",
+      "list_directory",
+    ]);
+    // Tools are withdrawn exactly when the schema appears.
+    expect(client.toolRequests.at(-1)?.tools).toEqual([]);
+    expect(client.toolRequests.at(-1)?.schema).toBeDefined();
+  });
+
+  it("never shows the exploring agent the questions it is being scored on", async () => {
+    writeCase("case-001.json", demoCase());
+    const client = toolStubClient();
+
+    await runEvaluation({ config, client, casesDir, resultsDir, now, system: "advanced", budget });
+
+    for (const request of client.toolRequests) {
+      const conversation = JSON.stringify(request.steps);
+      expect(conversation).not.toContain(QUESTION_SENTINEL);
+      expect(conversation).not.toContain(ANSWER_SENTINEL);
+      expect(request.systemInstruction).not.toContain(QUESTION_SENTINEL);
+    }
+  });
+
+  it("records the budget it ran under, so a result can be reproduced", async () => {
+    writeCase("case-001.json", demoCase());
+    const trajectoryDir = path.join(workspace, "trajectories");
+
+    const { report } = await runEvaluation({
+      config,
+      client: toolStubClient(),
+      casesDir,
+      resultsDir,
+      trajectoryDir,
+      now,
+      system: "advanced",
+      budget,
+    });
+
+    const runId = report.cases[0]?.runId ?? "";
+    const record = JSON.parse(readFileSync(path.join(trajectoryDir, `${runId}.json`), "utf8"));
+    expect(record.meta.system).toBe("advanced");
+    expect(record.meta.exploration.budget).toEqual(budget);
+    expect(record.meta.exploration.callsByTool).toEqual({ read_file: 1 });
+  });
+
+  it("waits between cases when a delay is configured, for provider quotas", async () => {
+    writeCase("case-001.json", demoCase());
+    writeCase("case-002.json", demoCase({ id: "case-002" }));
+    const lines: string[] = [];
+
+    const started = Date.now();
+    await runEvaluation({
+      config,
+      client: toolStubClient(),
+      casesDir,
+      resultsDir,
+      now,
+      system: "advanced",
+      budget,
+      caseDelaySeconds: 0.05,
+      logger: (line) => lines.push(line),
+    });
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(50);
+    expect(lines.filter((line) => line.includes("waiting"))).toHaveLength(1);
+  });
+
+  it("writes a latest-advanced pair alongside the baseline's, never overwriting it", async () => {
+    writeCase("case-001.json", demoCase());
+
+    await runEvaluation({ config, client: stubClient(), casesDir, resultsDir, now });
+    await runEvaluation({ config, client: toolStubClient(), casesDir, resultsDir, now, system: "advanced", budget });
+
+    expect(existsSync(path.join(resultsDir, "latest-baseline.json"))).toBe(true);
+    expect(existsSync(path.join(resultsDir, "latest-advanced.json"))).toBe(true);
+    const baseline = JSON.parse(readFileSync(path.join(resultsDir, "latest-baseline.json"), "utf8"));
+    expect(baseline.system).toBe("baseline");
+  });
+
+  it("counts an advanced case that crashes as a failure, like any other", async () => {
+    writeCase("case-001.json", demoCase({ repository: "does/not/exist" }));
+
+    const { report } = await runEvaluation({
+      config,
+      client: toolStubClient(),
+      casesDir,
+      resultsDir,
+      now,
+      system: "advanced",
+      budget,
+    });
+
+    expect(report.metrics.failedCases).toBe(1);
+    expect(report.metrics.totalQuestions).toBe(2);
+    expect(report.metrics.evidenceBackedTaskAccuracy).toBe(0);
   });
 });

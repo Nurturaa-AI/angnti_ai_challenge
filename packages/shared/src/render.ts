@@ -1,4 +1,4 @@
-import type { Evidence, RunRecord } from "@repo-arch/shared";
+import type { Evidence, RunRecord } from "./schemas";
 
 /**
  * The briefing, rendered for a human.
@@ -6,6 +6,11 @@ import type { Evidence, RunRecord } from "@repo-arch/shared";
  * Evidence is inline rather than in an appendix: the claim and its citation
  * should be impossible to read apart. The audit block sits near the top, so a
  * reader learns how much of the briefing is grounded before reading any of it.
+ *
+ * It lives in `shared` rather than in one system's package because it renders a
+ * `RunRecord` — a contract both systems produce — and reads `meta.system` to say
+ * which one produced it. A renderer that had to be swapped per system would make
+ * two briefings hard to compare side by side.
  */
 
 export function renderBriefingMarkdown(record: RunRecord): string {

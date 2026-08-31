@@ -1,6 +1,7 @@
 #!/usr/bin/env -S npx tsx
 import path from "node:path";
-import { BASELINE_SYSTEM_NAME, renderBriefingMarkdown, runBaseline } from "@repo-arch/baseline";
+import { ADVANCED_SYSTEM_NAME, runAdvanced } from "@repo-arch/advanced";
+import { BASELINE_SYSTEM_NAME, runBaseline } from "@repo-arch/baseline";
 import { DEFAULT_CASES_DIR, DEFAULT_RESULTS_DIR, runEvaluation } from "@repo-arch/evaluation";
 import {
   ConfigError,
@@ -8,30 +9,44 @@ import {
   formatError,
   loadConfig,
   loadDotEnv,
+  loadExplorationBudget,
+  renderBriefingMarkdown,
   writeJsonFile,
   writeTextFile,
   type ConfigOverrides,
+  type ExplorationBudgetOverrides,
+  type RunRecord,
   type ThinkingLevel,
 } from "@repo-arch/shared";
 
 /**
  * The command line.
  *
- * Hand-rolled argument parsing, deliberately: two commands and eight flags do not
- * justify a dependency, and the parser is small enough to read in one sitting.
+ * Hand-rolled argument parsing, deliberately: three commands and a flat list of
+ * flags do not justify a dependency, and the parser is small enough to read in
+ * one sitting.
  *
  *   repo-arch baseline <repository> [flags]
- *   repo-arch evaluate [--system baseline] [flags]
+ *   repo-arch advanced <repository> [flags]
+ *   repo-arch evaluate [--system baseline|advanced] [flags]
+ *
+ * `baseline` and `advanced` share every output path below. Whichever produced the
+ * run record, it is written, rendered and summarised identically — so the two can
+ * be diffed directly, and so nothing in the reporting layer can flatter one of
+ * them.
  */
 
 const USAGE = `repo-arch — understand an unfamiliar codebase before you change it
 
 USAGE
   pnpm repo:baseline -- <path-to-repository> [flags]
+  pnpm repo:advanced -- <path-to-repository> [flags]
   pnpm evaluate:baseline [flags]
+  pnpm evaluate:advanced [flags]
 
 COMMANDS
-  baseline <path>   Produce a briefing for a local repository (one model call, shallow context).
+  baseline <path>   Briefing from one model call over shallow context. No file reading.
+  advanced <path>   Briefing from bounded, targeted exploration: search, read, list.
   evaluate          Run every evaluation case and write JSON + Markdown results.
 
 FLAGS
@@ -40,12 +55,22 @@ FLAGS
   --seed <n>             Sampling seed. The Interactions API takes a seed, not a temperature.
   --thinking <level>     low | medium | high.
   --max-output <n>       Output token ceiling.
-  --out <dir>            Where to write output (baseline: reports/, evaluate: evaluation/results/).
+  --out <dir>            Where to write output (analysis: reports/, evaluate: evaluation/results/).
   --cases <dir>          Case directory for evaluate (default: ${DEFAULT_CASES_DIR}).
   --case <id>            Evaluate only this case id. Repeatable.
-  --system <name>        System to evaluate (only "${BASELINE_SYSTEM_NAME}" exists today).
+  --system <name>        System to evaluate: "${BASELINE_SYSTEM_NAME}" or "${ADVANCED_SYSTEM_NAME}".
+  --case-delay <s>       Seconds to wait between cases. Use it to stay under a rate limit.
   --quiet                Suppress the briefing on stdout; still writes files.
   -h, --help             Show this message.
+
+EXPLORATION BUDGET (advanced only; each also settable from the environment)
+  --max-tool-calls <n>     Total tool calls allowed across the run.
+  --max-turns <n>          Model turns allowed before synthesis is forced.
+  --max-search-results <n> Rows returned by one search_code call.
+  --max-file-lines <n>     Lines returned by one read_file call.
+  --max-file-bytes <n>     Bytes returned by one read_file call.
+  --max-list-entries <n>   Entries returned by one list_directory call.
+  --max-list-depth <n>     Depth walked by one list_directory call.
 
 ENVIRONMENT
   GEMINI_API_KEY         Required unless --mock. Copy .env.example to .env.
@@ -56,10 +81,12 @@ interface ParsedArgs {
   command: string | undefined;
   positional: string[];
   overrides: ConfigOverrides;
+  budget: ExplorationBudgetOverrides;
   out: string | undefined;
   casesDir: string | undefined;
   caseIds: string[];
   system: string | undefined;
+  caseDelaySeconds: number | undefined;
   quiet: boolean;
   help: boolean;
 }
@@ -69,10 +96,12 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     command: undefined,
     positional: [],
     overrides: {},
+    budget: {},
     out: undefined,
     casesDir: undefined,
     caseIds: [],
     system: undefined,
+    caseDelaySeconds: undefined,
     quiet: false,
     help: false,
   };
@@ -138,6 +167,30 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       case "--system":
         parsed.system = requireValue("--system", argv[++index]);
         break;
+      case "--case-delay":
+        parsed.caseDelaySeconds = requireNumber("--case-delay", argv[++index]);
+        break;
+      case "--max-tool-calls":
+        parsed.budget.maxToolCalls = requireNumber("--max-tool-calls", argv[++index]);
+        break;
+      case "--max-turns":
+        parsed.budget.maxTurns = requireNumber("--max-turns", argv[++index]);
+        break;
+      case "--max-search-results":
+        parsed.budget.maxSearchResults = requireNumber("--max-search-results", argv[++index]);
+        break;
+      case "--max-file-lines":
+        parsed.budget.maxFileLines = requireNumber("--max-file-lines", argv[++index]);
+        break;
+      case "--max-file-bytes":
+        parsed.budget.maxFileBytes = requireNumber("--max-file-bytes", argv[++index]);
+        break;
+      case "--max-list-entries":
+        parsed.budget.maxListEntries = requireNumber("--max-list-entries", argv[++index]);
+        break;
+      case "--max-list-depth":
+        parsed.budget.maxListDepth = requireNumber("--max-list-depth", argv[++index]);
+        break;
       default:
         if (argument.startsWith("-")) {
           throw new ConfigError(`Unknown flag "${argument}".`, "Run with --help to see the supported flags.");
@@ -162,52 +215,79 @@ async function main(argv: readonly string[]): Promise<number> {
 
   switch (args.command) {
     case "baseline":
-      return await commandBaseline(args);
+      return await commandAnalyze(args, BASELINE_SYSTEM_NAME);
+    case "advanced":
+      return await commandAnalyze(args, ADVANCED_SYSTEM_NAME);
     case "evaluate":
       return await commandEvaluate(args);
     default:
-      throw new ConfigError(`Unknown command "${args.command}".`, 'Expected "baseline" or "evaluate".');
+      throw new ConfigError(
+        `Unknown command "${args.command}".`,
+        'Expected "baseline", "advanced" or "evaluate".',
+      );
   }
 }
 
-async function commandBaseline(args: ParsedArgs): Promise<number> {
+async function commandAnalyze(args: ParsedArgs, system: string): Promise<number> {
   const repositoryPath = args.positional[0];
   if (repositoryPath === undefined) {
     throw new ConfigError(
       "No repository path given.",
-      "Usage: pnpm repo:baseline -- ./path/to/repository",
+      `Usage: pnpm repo:${system} -- ./path/to/repository`,
     );
   }
 
   const config = loadConfig(args.overrides);
   const outDir = args.out ?? "reports";
 
-  process.stderr.write(`baseline: ${repositoryPath} via ${config.provider}/${config.model}\n`);
-  const record = await runBaseline({ repositoryPath, config });
+  let record: RunRecord;
+  if (system === ADVANCED_SYSTEM_NAME) {
+    const budget = loadExplorationBudget(args.budget);
+    process.stderr.write(
+      `advanced: ${repositoryPath} via ${config.provider}/${config.model}, ` +
+        `budget ${budget.maxToolCalls} calls / ${budget.maxTurns} turns\n`,
+    );
+    record = await runAdvanced({ repositoryPath, config, budget });
+  } else {
+    process.stderr.write(`baseline: ${repositoryPath} via ${config.provider}/${config.model}\n`);
+    record = await runBaseline({ repositoryPath, config });
+  }
+
   const briefing = renderBriefingMarkdown(record);
 
   const jsonPath = path.join(outDir, `${record.meta.runId}.json`);
   const markdownPath = path.join(outDir, `${record.meta.runId}.md`);
   writeJsonFile(jsonPath, record);
   writeTextFile(markdownPath, briefing);
-  writeJsonFile(path.join("trajectories", `${record.meta.runId}.json`), {
+  const trajectoryPath = path.join("trajectories", `${record.meta.runId}.json`);
+  writeJsonFile(trajectoryPath, {
     runId: record.meta.runId,
     system: record.meta.system,
     config: describeConfig(config),
     contextSources: record.meta.contextSources,
     evidenceAudit: record.meta.evidenceAudit,
+    exploration: record.meta.exploration ?? null,
     steps: record.trajectory,
   });
 
   if (!args.quiet) process.stdout.write(`${briefing}\n`);
 
   const audit = record.meta.evidenceAudit;
+  const exploration = record.meta.exploration;
   process.stderr.write(
     [
       "",
       `briefing:   ${markdownPath}`,
       `run record: ${jsonPath}`,
-      `trajectory: ${path.join("trajectories", `${record.meta.runId}.json`)}`,
+      `trajectory: ${trajectoryPath}`,
+      ...(exploration === undefined
+        ? []
+        : [
+            `exploration:${exploration.toolCalls} tool call(s) over ${exploration.turns} turn(s), ` +
+              `${exploration.failedToolCalls} failed, ${exploration.filesRead.length} file(s) read, ` +
+              `${exploration.bytesFromTools} byte(s) collected` +
+              `${exploration.budgetExhausted ? ", budget exhausted" : ""}`,
+          ]),
       `citations:  ${audit.grounded}/${audit.claimed} verified, ${audit.dropped.length} dropped, ` +
         `${audit.unsupportedClaims} unsupported claim(s)`,
       `tokens:     ${record.meta.usage.inputTokens} in / ${record.meta.usage.outputTokens} out`,
@@ -221,19 +301,28 @@ async function commandBaseline(args: ParsedArgs): Promise<number> {
 
 async function commandEvaluate(args: ParsedArgs): Promise<number> {
   const config = loadConfig(args.overrides);
+  const system = args.system ?? BASELINE_SYSTEM_NAME;
   const output = await runEvaluation({
-    system: args.system ?? BASELINE_SYSTEM_NAME,
+    system,
     casesDir: args.casesDir ?? DEFAULT_CASES_DIR,
     resultsDir: args.out ?? DEFAULT_RESULTS_DIR,
     trajectoryDir: "trajectories",
     config,
     caseIds: args.caseIds,
+    // Only the advanced system reads a budget; passing it unconditionally would be
+    // harmless but misleading in the run record.
+    budget: system === ADVANCED_SYSTEM_NAME ? loadExplorationBudget(args.budget) : undefined,
+    caseDelaySeconds: args.caseDelaySeconds,
     logger: (message) => process.stderr.write(`${message}\n`),
   });
 
   const metrics = output.report.metrics;
   process.stdout.write(
     [
+      "",
+      `System: ${output.report.system} v${output.report.systemVersion} ` +
+        `(${output.report.provider}/${output.report.model}, seed ${output.report.seed}, ` +
+        `thinking ${output.report.thinkingLevel})`,
       "",
       `Evidence-backed task accuracy: ${(metrics.evidenceBackedTaskAccuracy * 100).toFixed(1)}% ` +
         `(${metrics.evidenceBackedAnswers}/${metrics.totalQuestions})`,

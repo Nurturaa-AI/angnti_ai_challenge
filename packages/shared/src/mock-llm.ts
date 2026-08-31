@@ -1,6 +1,13 @@
 import type { AnalysisConfig } from "./config";
 import { parseSourceBlocks, type ContextSourceText } from "./context-format";
-import type { LlmClient, StructuredRequest, StructuredResponse } from "./llm";
+import type {
+  ConversationStep,
+  LlmClient,
+  StructuredRequest,
+  StructuredResponse,
+  ToolTurnRequest,
+  ToolTurnResponse,
+} from "./llm";
 import type { AnalysisBody, Component, Dependency, Evidence } from "./schemas";
 
 /**
@@ -15,6 +22,8 @@ import type { AnalysisBody, Component, Dependency, Evidence } from "./schemas";
  * its scores are a floor, not a result. Reports label mock runs explicitly.
  */
 export function createMockLlmClient(config: AnalysisConfig): LlmClient {
+  const noUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+
   return {
     provider: "mock",
     model: config.model,
@@ -29,7 +38,180 @@ export function createMockLlmClient(config: AnalysisConfig): LlmClient {
         usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
       });
     },
+
+    generateWithTools(request: ToolTurnRequest): Promise<ToolTurnResponse> {
+      // A schema on the request means exploration is over and a briefing is due.
+      if (request.schema) {
+        const body = buildMockBodyFromConversation(request.steps);
+        return Promise.resolve({
+          text: JSON.stringify(body),
+          toolCalls: [],
+          providerSteps: [],
+          model: config.model,
+          usage: noUsage,
+        });
+      }
+
+      const next = nextMockToolCall(request.steps);
+      return Promise.resolve({
+        text: next ? "" : "Exploration complete: I have read enough to answer.",
+        toolCalls: next ? [next] : [],
+        // A mock has no provider-side continuation token to echo back.
+        providerSteps: [],
+        model: config.model,
+        usage: noUsage,
+      });
+    },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Offline tool trajectory
+// ---------------------------------------------------------------------------
+
+/**
+ * A fixed three-call itinerary: list the tree, search it, then read a file it
+ * found. It exercises every tool, the argument path, the ledger and the grounding
+ * of tool-derived evidence — the whole orchestration — with no API key.
+ *
+ * The plan is driven by the conversation history rather than by a counter held in
+ * a closure, so the agent loop and the mock cannot fall out of step, and a replay
+ * of the same history always produces the same next call.
+ */
+function nextMockToolCall(
+  steps: readonly ConversationStep[],
+): { id: string; name: string; arguments: Record<string, unknown> } | null {
+  const results = steps.filter((step) => step.kind === "toolResult");
+  const id = `mock-call-${results.length + 1}`;
+
+  if (results.length === 0) return { id, name: "list_directory", arguments: { path: "", depth: 2 } };
+  // "import" appears in essentially every codebase, so the search returns real
+  // hits without the mock needing to understand the repository.
+  if (results.length === 1) return { id, name: "search_code", arguments: { query: "import", maxResults: 10 } };
+  if (results.length === 2) {
+    const path = pickFileToRead(steps);
+    if (path) return { id, name: "read_file", arguments: { path, endLine: 60 } };
+  }
+  return null;
+}
+
+const CODE_EXTENSIONS = [".ts", ".js", ".py", ".go", ".rb", ".java", ".rs"];
+const READABLE_EXTENSIONS = [...CODE_EXTENSIONS, ".md", ".json", ".toml", ".yaml"];
+
+/** Picks a file from the `list_directory` output already in the conversation. */
+function pickFileToRead(steps: readonly ConversationStep[]): string | null {
+  const listing = steps.find((step) => step.kind === "toolResult" && step.name === "list_directory");
+  if (listing?.kind !== "toolResult") return null;
+
+  // The listing is indented; reconstruct each entry's full path from the indent depth.
+  const stack: string[] = [];
+  const candidates: string[] = [];
+
+  for (const line of listing.output.split("\n").slice(1)) {
+    const indentMatch = /^(\s*)(\S.*)$/.exec(line);
+    if (!indentMatch?.[1] || indentMatch[2] === undefined) {
+      // Depth-zero entry, or a blank/header line.
+      const flat = /^(\S.*)$/.exec(line);
+      if (!flat?.[1]) continue;
+      stack.length = 0;
+      recordEntry(flat[1], stack, candidates);
+      continue;
+    }
+    const depth = Math.floor(indentMatch[1].length / 2);
+    stack.length = depth;
+    recordEntry(indentMatch[2], stack, candidates);
+  }
+
+  // Preference order matters for what the mock trajectory actually proves. A nested
+  // source file is not part of the reconnaissance context, so reading one exercises
+  // the case the real system exists for: the evidence ledger growing to hold
+  // something the shallow pass could not have seen. Falling back to a top-level
+  // README would only re-cite what was already in the prompt.
+  const hasExtension = (candidate: string, extensions: readonly string[]): boolean =>
+    extensions.some((extension) => candidate.endsWith(extension));
+
+  return (
+    candidates.find((candidate) => candidate.includes("/") && hasExtension(candidate, CODE_EXTENSIONS)) ??
+    candidates.find((candidate) => hasExtension(candidate, CODE_EXTENSIONS)) ??
+    candidates.find((candidate) => hasExtension(candidate, READABLE_EXTENSIONS)) ??
+    candidates[0] ??
+    null
+  );
+}
+
+function recordEntry(entry: string, stack: string[], candidates: string[]): void {
+  if (entry.endsWith("/")) {
+    stack.push(entry.slice(0, -1));
+    return;
+  }
+  const fileMatch = /^(.+?) \(\d+ bytes\)$/.exec(entry);
+  if (!fileMatch?.[1]) return;
+  candidates.push([...stack, fileMatch[1]].join("/"));
+}
+
+/**
+ * Builds a briefing from the exploration transcript.
+ *
+ * The excerpt is taken from a `read_file` result with the line-number gutter
+ * stripped, which is exactly what a real model does when it quotes code — and it
+ * is what the evidence ledger can verify, because the ledger holds the raw slice.
+ */
+function buildMockBodyFromConversation(steps: readonly ConversationStep[]): AnalysisBody {
+  const firstUser = steps.find((step) => step.kind === "user");
+  const body = buildMockBody(firstUser?.kind === "user" ? firstUser.text : "");
+
+  const read = steps.filter((step) => step.kind === "toolResult" && step.name === "read_file" && !step.isError);
+  const latest = read.at(-1);
+  if (latest?.kind !== "toolResult") return body;
+
+  const parsed = parseReadFileOutput(latest.output);
+  if (!parsed) return body;
+
+  const fileEvidence: Evidence = {
+    type: "file",
+    source: parsed.path,
+    location: parsed.location,
+    excerpt: parsed.excerpt,
+    supports: `Content of ${parsed.path}, read during exploration.`,
+  };
+
+  return {
+    ...body,
+    summary: `${body.summary} During exploration, ${parsed.path} was read directly.`,
+    components: [
+      ...body.components,
+      {
+        name: parsed.path,
+        path: parsed.path,
+        responsibility: "File read during exploration. Its contents were returned by read_file, not inferred.",
+        evidence: [fileEvidence],
+      },
+    ],
+    evidence: [...body.evidence, fileEvidence],
+    confidence: 0.4,
+  };
+}
+
+interface ParsedReadFile {
+  path: string;
+  location: string;
+  excerpt: string;
+}
+
+function parseReadFileOutput(output: string): ParsedReadFile | null {
+  const lines = output.split("\n");
+  const header = /^(\S+) — lines (\d+)-(\d+) of \d+/.exec(lines[0] ?? "");
+  if (!header?.[1] || !header[2] || !header[3]) return null;
+
+  // Pick the first substantial numbered line: grounding needs 8+ characters to
+  // treat an excerpt as verifiable, so a lone brace would prove nothing.
+  for (const line of lines.slice(1)) {
+    const gutter = /^\s*(\d+) \| (.*)$/.exec(line);
+    const text = gutter?.[2]?.trim();
+    if (!gutter?.[1] || text === undefined || text.length < 12) continue;
+    return { path: header[1], location: `L${gutter[1]}`, excerpt: text };
+  }
+  return null;
 }
 
 function buildMockBody(prompt: string): AnalysisBody {

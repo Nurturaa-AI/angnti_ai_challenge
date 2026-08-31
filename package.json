@@ -1,6 +1,6 @@
 {
   "name": "repo-archaeologist",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Understand an unfamiliar codebase before you change it. Evidence-backed engineering briefings for unfamiliar Git repositories.",
@@ -12,7 +12,9 @@
     "setup": "pnpm fixtures:build",
     "fixtures:build": "tsx scripts/build-fixtures.ts",
     "repo:baseline": "tsx apps/cli/src/index.ts baseline",
+    "repo:advanced": "tsx apps/cli/src/index.ts advanced",
     "evaluate:baseline": "tsx apps/cli/src/index.ts evaluate --system baseline",
+    "evaluate:advanced": "tsx apps/cli/src/index.ts evaluate --system advanced",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
