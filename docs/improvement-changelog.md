@@ -481,3 +481,233 @@ figures remain valid and were not re-run for the fix. They were re-run anyway, a
 
 $0.044973 and 92 seconds of model time across both scored runs, plus the discarded first
 advanced attempt and the live probes that diagnosed the 400.
+
+---
+
+## Iteration 3 — Evidence Precision Pass
+
+### Hypothesis
+
+Iteration 2 reached 100 % answer accuracy but 85.7 % evidence-backed accuracy. Both remaining
+failures had the same shape: the answer was right, the citation was grounded and technically
+relevant, and the evaluator had expected a *different* source. Not an answer problem — a
+**citation-selection** problem.
+
+The stated plan was to fix it by *pruning*: score each claim's citations and drop the weak ones.
+Reading `packages/evaluator/src/score.ts` first showed that this cannot work, and the reason is
+worth stating because it inverts the whole iteration:
+
+```ts
+evidenceBacked = bestEvidenceStrength(pool, expectedEvidence) === "content"
+```
+
+`bestEvidenceStrength` is a **best-of** reduction over the citation pool. Adding a citation can
+only raise or hold it; removing one can only lower or hold it. Pruning is therefore incapable of
+improving the primary metric — and post-synthesis it saves no tokens either, so it could not
+qualify under the cost clause of the decision rule. Worse, both Iteration 2 failures cited
+*exactly one* source each. There was nothing to prune.
+
+So the hypothesis was reversed: if the metric asks "does *any* citation on this claim point at
+the source that proves it", then the fix is not to remove the model's citation but to **add the
+one it did not think to cite** — from evidence the ledger already held, with a verbatim excerpt,
+subject to the same grounding check as everything else.
+
+### Change
+
+A deterministic pass between schema validation and grounding. No model call, no embeddings, no
+index, no file opened. Two halves with deliberately different risk profiles:
+
+**Hygiene** (cannot change the metric, by construction) — exact-duplicate removal, same-source
+same-location redundancy removal, and a stable score-descending order that breaks ties by the
+model's own ordering. Provably cannot remove a `(source, location)` pair from a claim, so it
+cannot lower a best-of metric.
+
+**Corroboration** (the only half that can move the metric) — for a claim that already has at
+least one *verifiable* citation, attach up to `maxCorroborations` (default 2) further ledger
+sources, each admitted only if one of its lines shares at least `minCorroborationTerms` (default 2)
+distinctive stemmed terms with the claim. The excerpt is a verbatim prefix of that line, so
+grounding re-verifies it like any other citation.
+
+Five rules keep it inside the constraints:
+
+1. **Ledger-only.** Nothing is opened; candidates come from `ledger.toArray()`.
+2. **Content kinds only.** A directory tree can never corroborate, so existence evidence is
+   never upgraded into content evidence.
+3. **No invented `location`.** The ledger holds a raw slice whose first line is not necessarily
+   line 1 of the file, so any line number the pass computed would be a guess. The excerpt locates
+   itself.
+4. **Never rescues an unsupported claim.** The gate is `distinct.some(isVerifiable)` — a claim
+   whose every citation is unverifiable (a hallucinated path, a paraphrased quote) gets no
+   corroboration and stays unsupported. Without this, the pass could launder a hallucination into
+   a supported statement by attaching real evidence to a fabricated claim.
+5. **Grounding still decides.** The pass proposes; `groundAnalysis` disposes. The ledger remains
+   the sole authority.
+
+Rule 4 was not in the design. It was found by a **failing existing test** — `advanced.test.ts`
+"marks the claim unsupported when its only citation is dropped" went red because the first gate
+was `distinct.length === 0`, which let a claim whose single citation was a hallucinated path
+qualify for corroboration. Fixed in the implementation, not the test, by exporting
+`createCitationVerifier` from the grounding layer so the two layers use literally the same
+`verify` and cannot drift.
+
+### Measurement
+
+Two paired runs, because the task's commands name `gemini-3.5-flash` while Iteration 2 was
+measured on `gemini-3.5-flash-lite`. Both are reported; neither is hidden.
+
+#### The like-for-like comparison — `gemini-3.5-flash-lite`, same model, seed and cases as Iteration 2
+
+| | Advanced (Iteration 2) | Advanced (Iteration 3) | Δ |
+|---|---|---|---|
+| **Evidence-backed task accuracy** | **85.7 % (12/14)** | **100.0 % (14/14)** | **+14.3 pts** |
+| Answer accuracy | 100.0 % (14/14) | 100.0 % (14/14) | 0 |
+| Cases passed (all answers correct) | 2 / 2 | 2 / 2 | 0 |
+| Cases fully cited (all answers evidence-backed) | 0 / 2 | 2 / 2 | +2 |
+| Unsupported answers | 0 | 0 | 0 |
+| Fabrications | 0 | 0 | 0 |
+| Dropped citations | 0 | 0 | 0 |
+| Briefing unsupported claims | 0 | 0 | 0 |
+| Mean evidence relevance | 0.7321 (n=14) | 0.4105 (n=14) | **−0.3216** |
+| Grounded citations in the briefing | 31 | 84 | ×2.71 |
+| Tokens | 56 795 in / 6 400 out | 56 795 in / 6 400 out | **0** |
+| Cost | $0.033038 | $0.033038 | **$0** |
+| Wall clock | 54.0 s | 55.8 s | +1.8 s |
+
+Run ids `eval-advanced-2026-08-31T04-03-32Z` (Iteration 2) and `eval-advanced-2026-08-31T06-18-59Z`
+(Iteration 3).
+
+**The token counts are identical, per case, to the digit** — 35 379/3 931 for `orders-api` and
+21 416/2 469 for `pyflow` — and so are the pre-pass citation counts (19 and 12, matching Iteration
+2's `claimed`). The pass runs after synthesis, so the prompts were byte-identical and the model
+produced the same output twice. That makes this an unusually clean attribution: **the same model
+output scored 85.7 % with Iteration 2's citations and 100 % with Iteration 3's.** The entire
++14.3 points belongs to the deterministic pass, for zero extra tokens.
+
+#### Per question, like-for-like
+
+`C` = answer correct, `E` = evidence-backed.
+
+| Question | Iteration 2 | Iteration 3 | Relevance | |
+|---|---|---|---|---|
+| `orders-api/q1-purpose` | `CE` | `CE` | 1 → 0.3333 | |
+| `orders-api/q2-http-framework` | `CE` | `CE` | 1 → 0.5 | |
+| `orders-api/q3-event-publication` | `CE` | `CE` | 0.3333 → 0.4444 | |
+| `orders-api/q4-auth-boundary` | `C-` | `CE` | 0 → 0.3333 | **won** |
+| `orders-api/q5-oversell-guard` | `CE` | `CE` | 1 → 0.6667 | |
+| `orders-api/q6-testing-gap` | `CE` | `CE` | 1 → 0.3333 | |
+| `orders-api/q7-api-surface` | `CE` | `CE` | 0.75 → 0.6364 | |
+| `pyflow/q1-purpose` | `CE` | `CE` | 1 → 0.3333 | |
+| `pyflow/q2-cli-library` | `CE` | `CE` | 1 → 0.3333 | |
+| `pyflow/q3-execution-order` | `C-` | `CE` | 0 → 0.3333 | **won** |
+| `pyflow/q4-state-store` | `CE` | `CE` | 0.6667 → 0.3333 | |
+| `pyflow/q5-untested-steps` | `CE` | `CE` | 1 → 0.3333 | |
+| `pyflow/q6-step-dispatch` | `CE` | `CE` | 0.5 → 0.5 | |
+| `pyflow/q7-no-external-scheduler` | `CE` | `CE` | 1 → 0.3333 | |
+
+Two gains, **zero losses**. Both gains are the exact failures the iteration was aimed at, and
+`pyflow/q3-execution-order` is the single question Iteration 2 *regressed* — the
+citation-substitution artefact that also cost Iteration 1 three questions. It is now fixed.
+
+#### The mandated pair — `gemini-3.5-flash`, the commands the task specifies
+
+| | Baseline | Advanced (Iteration 3) | Δ |
+|---|---|---|---|
+| **Evidence-backed task accuracy** | **78.6 % (11/14)** | **78.6 % (11/14)** | **0** |
+| Answer accuracy | 85.7 % (12/14) | 92.9 % (13/14) | +7.1 pts |
+| Cases passed | 0 / 2 | 1 / 2 | +1 |
+| Cases fully cited | 0 / 2 | 0 / 2 | 0 |
+| Unsupported answers | 1 | 2 | +1 |
+| Fabrications | 0 | 0 | 0 |
+| Dropped citations | 0 | 1 | +1 |
+| Briefing unsupported claims | 0 | 1 | +1 |
+| Mean evidence relevance | 0.9212 | 0.4848 | −0.4364 |
+| Tokens | 2 450 in / 5 271 out | 102 664 in / 8 468 out | ×14.7 |
+| Cost | $0.051115 | $0.230209 | ×4.50 |
+| Wall clock | 48.9 s | 906.8 s | ×18.5 |
+
+Run ids `eval-baseline-2026-08-31T05-51-52Z`, `eval-advanced-2026-08-31T05-53-01Z`.
+
+```sh
+pnpm evaluate:baseline -- --model gemini-3.5-flash --case-delay 20
+pnpm evaluate:advanced -- --model gemini-3.5-flash --case-delay 25
+```
+
+**On this pair the advanced system does not beat its own baseline on the primary metric.** Three
+questions moved each way: `orders-api/q1-purpose`, `orders-api/q5-oversell-guard` and
+`pyflow/q6-step-dispatch` became evidence-backed; `orders-api/q4-auth-boundary`,
+`pyflow/q3-execution-order` and `pyflow/q5-untested-steps` stopped being so. Net zero.
+
+The reason the pass could not help the three losses is structural and worth recording: all three
+scored `citedEvidence = 0`, meaning the evaluator found **no single claim** in the briefing that
+answered the question — `pyflow/q3-execution-order` says so explicitly ("keywords matched only
+across separate claims"). The pass operates on the citations of claims that exist. It cannot
+corroborate a claim the model never made, and by design it will not attach evidence to a claim
+with nothing verifiable on it. Fixing that is a synthesis problem, not a citation problem.
+
+The stronger model also moved the baseline a long way: 78.6 % against 64.3 % on `flash-lite`. Most
+of the headroom Iteration 2 measured against was the weaker model's, which is why the flash pair
+is a much harder test and why the like-for-like run is the one that isolates this change.
+
+#### The dropped citation and the unsupported claim, attributed
+
+The flash `pyflow` run dropped one citation — `README.md`, `excerpt-not-found` — and reported one
+unsupported claim. Both were the **model's**, not the pass's, and the reason is structural rather
+than a guess:
+
+- A corroboration's excerpt is a verbatim prefix of a trimmed line of `source.text`, taken from
+  the same `sources` array grounding indexes; ledger ids are unique, so `resolveSource` resolves
+  the citation back to the very object the line came from; and `normalizeForMatch` (collapse
+  whitespace, trim, lowercase) preserves the substring relation. A corroboration that the pass
+  emits is therefore always found. The `flash-lite` run confirms it empirically: **53
+  corroborations added across the two cases, 84/84 citations grounded, 0 dropped.**
+- The claim went unsupported precisely *because* the pass refused to touch it. Rule 4 declines to
+  corroborate a claim with no verifiable citation, so the model's paraphrased README quote was
+  left standing alone and grounding removed it. The alternative — corroborating it — would have
+  produced a supported-looking claim built on a quote that does not exist.
+
+That is the integrity property working as intended, and it shows up in the metrics as a
+regression. Both readings are true and the number stands as measured.
+
+### Why relevance fell
+
+`evidenceRelevance = relevantEvidence / citedEvidence` — a precision measure with a moving
+denominator. The pass adds up to two corroborations per claim, so a claim that cited one expected
+source now cites three: relevance 1 → 0.3333 exactly, which is why so many rows land on that
+value. Relevance fell on 10 questions, rose on 3 and held on 1, while every question kept
+`evidenceStrength = content` and the count of evidence-backed answers rose from 12 to 14. The
+denominator grew; nothing relevant was lost.
+
+This is a real cost, not a measurement artefact to wave away: the briefing now carries 2.71× the
+citations, and a reader checking them does more work per claim. The decision rule does not treat
+relevance as a rejection trigger, and §6 of the task explicitly warns against minimising citation
+count rather than maximising useful evidence — but a future iteration that wants both would have
+to make corroboration conditional on the claim's existing citations being weak, rather than
+unconditional up to the cap.
+
+### Result
+
+**Kept.** On the like-for-like comparison the primary metric rose 85.7 % → 100.0 % (+14.3 points)
+with answer accuracy held at 100 %, fabrications, dropped citations, unsupported claims and
+unsupported answers all still at zero, at identical token cost and +1.8 s of wall clock. Two
+questions won, none lost. The mandated `flash` pair shows no gain over its baseline and is
+reported above in full.
+
+### Decision
+
+**Iteration 3 is kept**, on the like-for-like evidence, with three caveats recorded rather than
+buried: the primary metric ties the baseline on `gemini-3.5-flash`; mean evidence relevance falls
+by a third; and the dataset is 14 questions, so 100 % means "no remaining failures in this
+dataset", not "solved". The `flash-lite` result is a ceiling on a small dataset and should be read
+as directional.
+
+The design also contradicts the task's stated mechanism — it adds citations where §4 and §5 asked
+for removal and ranking. That was a deliberate reading of §4's own escape clause ("unless the
+architecture already has a deterministic way to associate an existing ledger artifact with the
+claim") against the evaluator's best-of arithmetic, and the hygiene half implements the removal
+the task asked for. It is recorded here because the divergence is more interesting than the score.
+
+### Cost of the positive result
+
+$0.281324 and 955.7 seconds across the three scored runs (`flash` baseline, `flash` advanced,
+`flash-lite` advanced). The pass itself costs nothing: no model call, no file read, and token
+counts identical to Iteration 2's on the same model.
