@@ -20,12 +20,14 @@ import {
   createLlmClient,
   formatError,
   loadExplorationBudget,
+  loadPrecisionPolicy,
   timestampSlug,
   writeJsonFile,
   writeTextFile,
   type AnalysisConfig,
   type ExplorationBudget,
   type LlmClient,
+  type PrecisionPolicy,
   type RunRecord,
 } from "@repo-arch/shared";
 
@@ -70,6 +72,8 @@ export interface EvaluationRunOptions {
   caseIds?: readonly string[];
   /** Exploration limits for the advanced system. Ignored by the baseline. */
   budget?: ExplorationBudget;
+  /** Citation policy for the advanced system's precision pass. Ignored by the baseline. */
+  precisionPolicy?: PrecisionPolicy;
   /**
    * Seconds to wait between cases. Zero by default; raise it when a provider's
    * per-minute quota is the binding constraint rather than the model.
@@ -112,6 +116,7 @@ export async function runEvaluation(options: EvaluationRunOptions): Promise<Eval
   // single provider/model pair rather than a per-case guess.
   const client = options.client ?? createLlmClient(options.config);
   const budget = options.budget ?? loadExplorationBudget();
+  const precisionPolicy = options.precisionPolicy ?? loadPrecisionPolicy();
   const caseDelayMs = Math.max(options.caseDelaySeconds ?? 0, 0) * 1_000;
 
   const scores: CaseScore[] = [];
@@ -121,7 +126,7 @@ export async function runEvaluation(options: EvaluationRunOptions): Promise<Eval
       await delay(caseDelayMs);
     }
     log(`[${index + 1}/${loaded.length}] ${entry.case.id} — ${entry.case.repository}`);
-    const score = await evaluateCase(entry, { ...options, client, now, system, budget });
+    const score = await evaluateCase(entry, { ...options, client, now, system, budget, precisionPolicy });
     scores.push(score);
     log(
       score.error === undefined
@@ -164,6 +169,7 @@ interface CaseRunContext extends EvaluationRunOptions {
   now: () => Date;
   system: string;
   budget: ExplorationBudget;
+  precisionPolicy: PrecisionPolicy;
 }
 
 /**
@@ -180,7 +186,7 @@ function runSystem(entry: LoadedCase, context: CaseRunContext): Promise<RunRecor
     now: context.now,
   };
   return context.system === ADVANCED_SYSTEM_NAME
-    ? runAdvanced({ ...shared, budget: context.budget })
+    ? runAdvanced({ ...shared, budget: context.budget, precisionPolicy: context.precisionPolicy })
     : runBaseline(shared);
 }
 

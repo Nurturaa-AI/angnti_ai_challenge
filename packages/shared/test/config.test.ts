@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_EXPLORATION_BUDGET, loadExplorationBudget } from "../src/index";
+import { DEFAULT_EXPLORATION_BUDGET, DEFAULT_PRECISION_POLICY, loadExplorationBudget, loadPrecisionPolicy } from "../src/index";
 import { ConfigError } from "../src/errors";
 
 /**
@@ -130,3 +130,73 @@ function captureError(run: () => unknown): ConfigError | undefined {
   }
   return undefined;
 }
+
+/**
+ * The precision policy loader.
+ *
+ * Same shape as the budget above and the same reason for existing: iteration 3's
+ * control condition is the same system with corroboration switched off, so zero has to
+ * be reachable for exactly that one setting and rejected for the thresholds, where it
+ * would mean "any line of any file corroborates any claim".
+ */
+describe("loadPrecisionPolicy", () => {
+  it("returns the defaults when nothing is set", () => {
+    expect(loadPrecisionPolicy({}, {})).toEqual(DEFAULT_PRECISION_POLICY);
+  });
+
+  it("prefers an explicit override to the environment", () => {
+    const policy = loadPrecisionPolicy({ maxCorroborations: 1 }, { REPO_ARCHAEOLOGIST_MAX_CORROBORATIONS: "9" });
+    expect(policy.maxCorroborations).toBe(1);
+  });
+
+  it("reads every setting from the environment", () => {
+    expect(
+      loadPrecisionPolicy(
+        {},
+        {
+          REPO_ARCHAEOLOGIST_MAX_CORROBORATIONS: "3",
+          REPO_ARCHAEOLOGIST_MIN_CORROBORATION_TERMS: "4",
+          REPO_ARCHAEOLOGIST_MAX_CORROBORATION_CHARS: "120",
+        },
+      ),
+    ).toEqual({ maxCorroborations: 3, minCorroborationTerms: 4, maxCorroborationChars: 120 });
+  });
+
+  it("accepts zero corroborations, because that is the experiment's control", () => {
+    const policy = loadPrecisionPolicy({ maxCorroborations: 0 });
+
+    expect(policy.maxCorroborations).toBe(0);
+    // Switching corroboration off must leave the thresholds alone, or the control
+    // would be testing two changes at once.
+    expect(policy.minCorroborationTerms).toBe(DEFAULT_PRECISION_POLICY.minCorroborationTerms);
+  });
+
+  it("rejects zero for the thresholds", () => {
+    // A term floor of zero would let any line corroborate any claim, and a character
+    // ceiling of zero would quote nothing while still adding a citation.
+    expect(() => loadPrecisionPolicy({ minCorroborationTerms: 0 })).toThrow(ConfigError);
+    expect(() => loadPrecisionPolicy({ maxCorroborationChars: 0 })).toThrow(ConfigError);
+  });
+
+  it("explains what zero means, differently for the ceiling and for the thresholds", () => {
+    const ceiling = captureError(() => loadPrecisionPolicy({ maxCorroborations: -1 }));
+    const threshold = captureError(() => loadPrecisionPolicy({ minCorroborationTerms: 0 }));
+
+    expect(ceiling?.hint).toContain("valid experiment control");
+    expect(threshold?.hint).toContain("any line of any file");
+  });
+
+  it("names the flag when the value came from a flag, and the variable when it came from the environment", () => {
+    expect(() => loadPrecisionPolicy({ maxCorroborations: -1 })).toThrow(/--max-corroborations/);
+    expect(() => loadPrecisionPolicy({}, { REPO_ARCHAEOLOGIST_MIN_CORROBORATION_TERMS: "0" })).toThrow(
+      /REPO_ARCHAEOLOGIST_MIN_CORROBORATION_TERMS/,
+    );
+  });
+
+  it("rejects a fractional value and a non-numeric one", () => {
+    expect(() => loadPrecisionPolicy({ maxCorroborations: 1.5 })).toThrow(/whole number/);
+    expect(() => loadPrecisionPolicy({}, { REPO_ARCHAEOLOGIST_MAX_CORROBORATIONS: "lots" })).toThrow(
+      /must be a number/,
+    );
+  });
+});

@@ -241,6 +241,31 @@ export const ScoutSummarySchema = z.object({
 });
 export type ScoutSummaryRecord = z.infer<typeof ScoutSummarySchema>;
 
+/**
+ * What the evidence precision pass changed, after the model had finished.
+ *
+ * Every field is a count of an edit the pass made to citations the model had already
+ * produced, so a reader can tell a run where the pass did nothing from a run where it
+ * rewrote the evidence — and, if a result moves, attribute the move to removal or to
+ * corroboration rather than guessing.
+ */
+export const PrecisionSummarySchema = z.object({
+  /** Claims whose citation list the pass looked at, whether or not it changed anything. */
+  claimsInspected: z.number().int().min(0),
+  citationsBefore: z.number().int().min(0),
+  citationsAfter: z.number().int().min(0),
+  /** Citations identical to one already kept, down to the excerpt. */
+  duplicatesRemoved: z.number().int().min(0),
+  /** Citations wholly contained by another citation of the same source and location. */
+  redundantRemoved: z.number().int().min(0),
+  /** Ledger artefacts the model did not cite that the pass attached to a claim. */
+  corroborationsAdded: z.number().int().min(0),
+  claimsCorroborated: z.number().int().min(0),
+  /** Which sources those corroborations came from, so the additions can be audited. */
+  corroboratedSources: z.array(z.string()).default([]),
+});
+export type PrecisionSummaryRecord = z.infer<typeof PrecisionSummarySchema>;
+
 export const ExplorationSummarySchema = z.object({
   /** Model round trips, including the final synthesis call. */
   turns: z.number().int().min(0),
@@ -259,6 +284,8 @@ export const ExplorationSummarySchema = z.object({
   budget: z.record(z.string(), z.number()),
   /** Present only when a deterministic scout ran ahead of the model. */
   scout: ScoutSummarySchema.optional(),
+  /** Present only when the evidence precision pass ran after synthesis. */
+  precision: PrecisionSummarySchema.optional(),
 });
 export type ExplorationSummary = z.infer<typeof ExplorationSummarySchema>;
 

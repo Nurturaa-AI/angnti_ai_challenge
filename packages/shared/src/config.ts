@@ -1,5 +1,10 @@
 import { ConfigError } from "./errors";
 import {
+  DEFAULT_PRECISION_POLICY,
+  PRECISION_ZERO_ALLOWED,
+  type PrecisionPolicy,
+} from "./precision/policy";
+import {
   DEFAULT_EXPLORATION_BUDGET,
   type ExplorationBudget,
 } from "./tools/types";
@@ -221,4 +226,43 @@ export function loadExplorationBudget(
 /** `maxScoutFiles` -> `max-scout-files`, to name the flag a caller actually typed. */
 function kebabCase(key: string): string {
   return key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
+}
+
+// ---------------------------------------------------------------------------
+// Precision policy: how the agent is allowed to cite what it obtained.
+// ---------------------------------------------------------------------------
+
+export type PrecisionPolicyOverrides = Partial<Record<keyof PrecisionPolicy, number | undefined>>;
+
+const PRECISION_ENV_VARS: Record<keyof PrecisionPolicy, string> = {
+  maxCorroborations: "REPO_ARCHAEOLOGIST_MAX_CORROBORATIONS",
+  minCorroborationTerms: "REPO_ARCHAEOLOGIST_MIN_CORROBORATION_TERMS",
+  maxCorroborationChars: "REPO_ARCHAEOLOGIST_MAX_CORROBORATION_CHARS",
+};
+
+export function loadPrecisionPolicy(
+  overrides: PrecisionPolicyOverrides = {},
+  env: NodeJS.ProcessEnv = process.env,
+): PrecisionPolicy {
+  const policy = { ...DEFAULT_PRECISION_POLICY };
+
+  for (const key of Object.keys(PRECISION_ENV_VARS) as Array<keyof PrecisionPolicy>) {
+    const variable = PRECISION_ENV_VARS[key];
+    const fromEnv = parseNumber(env[variable], variable);
+    const value = overrides[key] ?? fromEnv;
+    if (value === undefined) continue;
+    const minimum = PRECISION_ZERO_ALLOWED.has(key) ? 0 : 1;
+    if (!Number.isInteger(value) || value < minimum) {
+      const source = overrides[key] === undefined ? variable : `--${kebabCase(key)}`;
+      throw new ConfigError(
+        `${source} must be a whole number of ${minimum} or more, received "${String(value)}".`,
+        minimum === 1
+          ? "A floor of zero would let any line of any file corroborate any claim."
+          : "Zero switches corroboration off, which is a valid experiment control; negatives are not.",
+      );
+    }
+    policy[key] = value;
+  }
+
+  return policy;
 }

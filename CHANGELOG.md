@@ -7,6 +7,138 @@ All notable changes to Repo Archaeologist. Format loosely follows
 
 Nothing yet. See [`## Next`](#next) for what the following iteration has to address.
 
+## [0.4.0] — 2026-08-31
+
+Iteration 3: the Evidence Precision Pass. Measured, and **kept** — 100.0 % evidence-backed task
+accuracy against Iteration 2's 85.7 % on the same model, seed and cases, for **zero additional
+tokens**. On the stronger `gemini-3.5-flash` the advanced system ties its own baseline at 78.6 %;
+both runs are reported below.
+
+### Added — the evidence precision pass
+
+A deterministic pass between schema validation and grounding. No model call, no embeddings, no
+index, no file opened. It edits only citations the model already produced, using only artefacts
+already in the evidence ledger.
+
+- `packages/shared/src/precision/`: `score.ts` (six-signal lexical citation scoring, used to
+  *order* citations, never to decide the metric), `corroborate.ts` (finds ledger sources whose
+  lines share distinctive stemmed terms with a claim), `policy.ts` (three bounds), `precision.ts`
+  (the pass), `index.ts`.
+- **Hygiene half** — exact-duplicate removal, same-source same-location redundancy removal, stable
+  score-descending order with the model's own ordering as tiebreak. Provably cannot remove a
+  `(source, location)` pair from a claim, so it cannot lower a best-of metric.
+- **Corroboration half** — up to `maxCorroborations` extra ledger sources per claim, each needing
+  a line that shares at least `minCorroborationTerms` distinctive terms. The excerpt is a verbatim
+  prefix of that line, so grounding re-verifies it like any other citation. This is the only half
+  that can move the primary metric, and the only half that carries risk.
+- **Content kinds only**, so existence evidence is never upgraded into content evidence. **No
+  invented `location`**, because the ledger holds a raw slice whose first line is not necessarily
+  line 1 of the file. **Never rescues an unsupported claim**: the gate is
+  `distinct.some(isVerifiable)`, so a claim whose every citation is unverifiable stays unsupported
+  rather than having real evidence attached to a fabricated statement.
+- `meta.exploration.precision` on every advanced run record: claims inspected, citations before and
+  after, duplicates removed, redundant removed, corroborations added, claims corroborated, and the
+  sources corroborated from. The counts reconcile exactly —
+  `after = before − duplicates − redundant + corroborations` — and that identity is asserted in the
+  tests.
+
+### Added — `createCitationVerifier` in the grounding layer
+
+`packages/shared/src/grounding.ts` exports a "would this citation survive grounding?" predicate
+built from the same `verify` the grounding layer itself uses, so a caller running *before*
+`groundAnalysis` cannot answer the question differently. It reports; it does not act. Dropping a
+citation and recording why remains `groundAnalysis`'s job alone.
+
+This exists because an **existing test failed**: `advanced.test.ts` "marks the claim unsupported
+when its only citation is dropped" went red when the first corroboration gate was
+`distinct.length === 0`, which let a claim whose single citation was a hallucinated path qualify for
+corroboration — laundering a hallucination into a supported claim. Fixed in the implementation, not
+the test.
+
+### Added — three precision bounds
+
+`--max-corroborations` (2), `--min-corroboration-terms` (2), `--max-corroboration-chars` (240),
+each settable by flag or `REPO_ARCHAEOLOGIST_MAX_CORROBORATIONS` /
+`REPO_ARCHAEOLOGIST_MIN_CORROBORATION_TERMS` / `REPO_ARCHAEOLOGIST_MAX_CORROBORATION_CHARS`.
+Thirteen bounds total. `--max-corroborations 0` is accepted, and is the experiment's control: the
+same system with the hygiene half only. Zero is rejected for both thresholds, where it would mean
+"any line of any file corroborates any claim".
+
+### Added — tests
+
+35 new tests, 362 → **397**, all passing. 27 in `packages/shared/test/precision.test.ts` covering
+content-beats-existence, relevance and specificity, the four removal rules, the
+never-lose-a-`(source, location)`-pair invariant, corroboration limits, the grounding contract and
+the summary identity; 8 in `packages/shared/test/config.test.ts` for the policy loader. Two
+existing assertions were extended, neither weakened: the advanced trajectory now expects a
+`refine-evidence` action, and a new assertion pins it *before* `ground-evidence` — reversing the two
+would let an unverified citation reach the briefing.
+
+One test asserts generality directly: it reads the four precision source files, strips comments, and
+fails if the code mentions `README`, `package.json`, `case-00`, `pyflow`, `expectedEvidence` or
+`expectedKeywords`. No question text, expected keyword or expected-evidence list reaches the pass.
+
+### Changed
+
+Pipeline is now collect context → scout → reconnaissance → exploration turns → synthesis → validate
+schema → **evidence precision** → grounding → briefing. Nothing before synthesis changed: no prompt
+edit, no scout change, no budget change, no change to the Gemini protocol implementation. The whole
+delta is attributable to one deterministic function.
+
+### Measurement
+
+Two paired runs, because the task's commands name `gemini-3.5-flash` while Iteration 2 was measured
+on `gemini-3.5-flash-lite`. Both are reported.
+
+Like-for-like, `gemini-3.5-flash-lite`, seed 7, thinking `low`, same unmodified cases:
+
+| | Iteration 2 | Iteration 3 | Δ |
+| --- | --- | --- | --- |
+| **Evidence-backed task accuracy** | **85.7 % (12/14)** | **100.0 % (14/14)** | **+14.3 pts** |
+| Answer accuracy | 100.0 % (14/14) | 100.0 % (14/14) | 0 |
+| Cases fully cited | 0 / 2 | 2 / 2 | +2 |
+| Fabrications / dropped / unsupported claims | 0 / 0 / 0 | 0 / 0 / 0 | 0 |
+| Mean evidence relevance | 0.7321 (n=14) | 0.4105 (n=14) | −0.3216 |
+| Tokens | 56 795 in / 6 400 out | 56 795 in / 6 400 out | **0** |
+| Cost | $0.033038 | $0.033038 | **$0** |
+
+The mandated commands, `gemini-3.5-flash`:
+
+| | Baseline | Iteration 3 | Δ |
+| --- | --- | --- | --- |
+| **Evidence-backed task accuracy** | **78.6 % (11/14)** | **78.6 % (11/14)** | **0** |
+| Answer accuracy | 85.7 % (12/14) | 92.9 % (13/14) | +7.1 pts |
+| Fabrications / dropped / unsupported claims | 0 / 0 / 0 | 0 / 1 / 1 | +0 / +1 / +1 |
+| Mean evidence relevance | 0.9212 | 0.4848 | −0.4364 |
+| Cost | $0.051115 | $0.230209 | ×4.50 |
+
+```sh
+pnpm evaluate:baseline -- --model gemini-3.5-flash --case-delay 20
+pnpm evaluate:advanced -- --model gemini-3.5-flash --case-delay 25
+pnpm evaluate:advanced -- --model gemini-3.5-flash-lite --case-delay 25
+```
+
+Run ids `eval-baseline-2026-08-31T05-51-52Z`, `eval-advanced-2026-08-31T05-53-01Z`,
+`eval-advanced-2026-08-31T06-18-59Z`.
+
+The `flash-lite` token counts are identical to Iteration 2's **per case, to the digit**, as are the
+pre-pass citation counts. The pass runs after synthesis, so the prompts were byte-identical and the
+model produced the same output twice: the same model output scored 85.7 % with Iteration 2's
+citations and 100 % with Iteration 3's. Two questions won, none lost, and one of the two was the
+single question Iteration 2 regressed.
+
+Reported honestly rather than quietly: on `flash` the advanced system ties its baseline, three
+questions moving each way; all three losses scored `citedEvidence = 0`, meaning the evaluator found
+no single claim answering the question, which the pass cannot fix because it edits citations rather
+than writing claims. The one dropped citation and one unsupported claim on that run were the
+model's own paraphrased README quote, left alone by the rule that refuses to corroborate a claim
+with nothing verifiable on it — the integrity property working, showing up in the metrics as a
+regression. Mean evidence relevance fell by a third: the pass multiplies citations by 2.71 and
+relevance divides by the pool.
+
+Full decomposition, the attribution argument and the decision in
+[`docs/improvement-changelog.md`](docs/improvement-changelog.md).
+
 ## [0.3.0] — 2026-08-31
 
 Iteration 2: the Evidence Scout. Measured, and **kept** — 85.7 % evidence-backed task accuracy
@@ -376,32 +508,36 @@ nothing in this release claims the results are good.
 
 ## Next
 
-Iteration 2 closed two of the four items that stood here: the agent now searches before it reads,
-and depth was added without spending the baseline's breadth to buy it. What remains, in order:
+Iteration 3 closed the first item that stood here, and not in the way it was written: rather than
+widening `expectedEvidence` — which the iteration was explicitly forbidden to touch — it taught the
+system to also cite the source the case named, which is the same fix seen from the other side and
+does not move the goalposts. `pyflow/q3-execution-order` and `orders-api/q4-auth-boundary`, the two
+questions that artefact had been costing since Iteration 1, are now both evidence-backed. What
+remains, in order:
 
-1. **Fix `expectedEvidence`, and make it the whole iteration.** This is now the top item and the
-   only thing standing between the advanced system and 14/14. Every question's expected-evidence
-   list names only files the baseline could see, so a system citing the implementation instead of
-   the README describing it is scored down for citing *better* evidence. **Both** questions
-   Iteration 2 still fails are this artefact, and it cost Iteration 1 three questions. Widen the
-   lists **and re-run both systems** — the dataset change has to be measured against the baseline
-   too, or it is indistinguishable from moving the goalposts. Write the new lists before looking
-   at which files the advanced system actually chose; deriving them from the winner's output is
-   fitting the ruler to the result. This has been deferred twice on purpose, both times to keep
-   the experiment clean, and deferring it a third time would start to look like avoiding the
-   answer.
-2. **Decide what mean evidence relevance is for.** It moved the wrong way while the primary metric
-   moved 21 points the right way, and both facts are real: the measure averages over only the
-   questions where it was measurable, so the two systems' figures have different denominators, and
-   it scores a claim *lower* for citing three grounded sources where the case named one. Either
-   report it over a fixed denominator, or split precision from coverage, or stop treating a
-   verified-but-unexpected citation as a miss. Any of those is defensible; the current
-   combination of all three is what made a 0.118 decline hard to interpret.
-3. **Grow the dataset before trusting any further delta.** Two repositories and 14 questions were
-   enough to catch a 7-point regression and a 21-point gain, and are not enough to resolve
-   anything smaller. A third fixture in a language neither current one uses would also test
-   whether the scout's term extraction generalises past JavaScript and Python vocabulary.
+1. **Grow the dataset. This is now blocking.** `gemini-3.5-flash-lite` is at 14/14, so the primary
+   metric has no headroom left on this dataset and the next iteration cannot be measured on it at
+   all — any change would score 100 % or worse, and a tie tells you nothing. `gemini-3.5-flash` sits
+   at 11/14 and is a harder test, but its three remaining failures are all `citedEvidence = 0`,
+   which is a synthesis problem rather than a citation one. A third fixture in a language neither
+   current one uses would also test whether the scout's term extraction generalises past JavaScript
+   and Python vocabulary. Nothing else on this list is worth doing first.
+2. **Decide what mean evidence relevance is for, and then fix corroboration to respect it.** It has
+   now moved the wrong way twice while the primary metric moved the right way, and this time by a
+   third of its value: the pass adds two corroborations per claim unconditionally up to the cap, so
+   a claim that cited exactly the expected source drops from 1.0 to 0.3333 for being *better*
+   supported. Either report it over a fixed denominator, or split precision from coverage, or stop
+   treating a verified-but-unexpected citation as a miss — and make corroboration conditional on the
+   claim's existing citations being weak rather than unconditional. The bounds already exist
+   (`--max-corroborations`); what is missing is a rule for when to spend them.
+3. **Give the advanced system a version of its own.** Every result record still reports
+   `systemVersion` `0.1.0` for the advanced system, unchanged across three iterations, so the run
+   artefacts cannot tell you which iteration produced them. Bump `ADVANCED_VERSION` at the *start*
+   of the next iteration, before any measurement, so the code and the evidence agree. It was left
+   alone here because changing it after the runs would have stamped a version on results that were
+   measured under another.
 4. **Then re-measure.** Hypothesis first, in
    [`docs/improvement-changelog.md`](docs/improvement-changelog.md), before any code changes. That
-   ordering is the reason Iteration 1 could be rejected without argument and Iteration 2 could be
-   kept without special pleading.
+   ordering is the reason Iteration 1 could be rejected without argument and Iterations 2 and 3
+   could be kept without special pleading — and the reason Iteration 3's stated mechanism could be
+   contradicted on the evidence rather than followed off a cliff.

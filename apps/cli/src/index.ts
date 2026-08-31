@@ -10,11 +10,13 @@ import {
   loadConfig,
   loadDotEnv,
   loadExplorationBudget,
+  loadPrecisionPolicy,
   renderBriefingMarkdown,
   writeJsonFile,
   writeTextFile,
   type ConfigOverrides,
   type ExplorationBudgetOverrides,
+  type PrecisionPolicyOverrides,
   type RunRecord,
   type ThinkingLevel,
 } from "@repo-arch/shared";
@@ -79,6 +81,11 @@ EVIDENCE SCOUT BUDGET (advanced only; separate from the model's tool budget abov
   --max-scout-searches <n> search_code calls the scout may make. Cheap: no tokens, a filesystem walk.
   --max-scout-files <n>    Files the scout may read. Expensive: each one enters every later prompt.
 
+EVIDENCE PRECISION (advanced only; applies after synthesis, opens no files)
+  --max-corroborations <n>      Uncited ledger artefacts the pass may attach per claim. 0 = hygiene only.
+  --min-corroboration-terms <n> Distinctive claim terms a line must share before it can corroborate.
+  --max-corroboration-chars <n> Longest excerpt the pass will quote from a corroborating line.
+
 ENVIRONMENT
   GEMINI_API_KEY         Required unless --mock. Copy .env.example to .env.
                          The key is never printed and never written to any output file.
@@ -89,6 +96,7 @@ interface ParsedArgs {
   positional: string[];
   overrides: ConfigOverrides;
   budget: ExplorationBudgetOverrides;
+  precision: PrecisionPolicyOverrides;
   out: string | undefined;
   casesDir: string | undefined;
   caseIds: string[];
@@ -105,6 +113,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     positional: [],
     overrides: {},
     budget: {},
+    precision: {},
     out: undefined,
     casesDir: undefined,
     caseIds: [],
@@ -212,6 +221,15 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       case "--max-scout-files":
         parsed.budget.maxScoutFiles = requireNumber("--max-scout-files", argv[++index]);
         break;
+      case "--max-corroborations":
+        parsed.precision.maxCorroborations = requireNumber("--max-corroborations", argv[++index]);
+        break;
+      case "--min-corroboration-terms":
+        parsed.precision.minCorroborationTerms = requireNumber("--min-corroboration-terms", argv[++index]);
+        break;
+      case "--max-corroboration-chars":
+        parsed.precision.maxCorroborationChars = requireNumber("--max-corroboration-chars", argv[++index]);
+        break;
       default:
         if (argument.startsWith("-")) {
           throw new ConfigError(`Unknown flag "${argument}".`, "Run with --help to see the supported flags.");
@@ -279,13 +297,15 @@ async function commandAnalyze(args: ParsedArgs, system: string): Promise<number>
   let record: RunRecord;
   if (system === ADVANCED_SYSTEM_NAME) {
     const budget = loadExplorationBudget(args.budget);
+    const precisionPolicy = loadPrecisionPolicy(args.precision);
     process.stderr.write(
       `advanced: ${repositoryPath} via ${config.provider}/${config.model}, ` +
         `budget ${budget.maxToolCalls} calls / ${budget.maxTurns} turns, ` +
-        `scout ${budget.maxScoutSearches} searches / ${budget.maxScoutFiles} reads` +
+        `scout ${budget.maxScoutSearches} searches / ${budget.maxScoutFiles} reads, ` +
+        `precision ${precisionPolicy.maxCorroborations} corroborations/claim` +
         `${args.focus === undefined ? "" : `, focus "${args.focus}"`}\n`,
     );
-    record = await runAdvanced({ repositoryPath, config, budget, focus: args.focus });
+    record = await runAdvanced({ repositoryPath, config, budget, precisionPolicy, focus: args.focus });
   } else {
     process.stderr.write(`baseline: ${repositoryPath} via ${config.provider}/${config.model}\n`);
     record = await runBaseline({ repositoryPath, config });
@@ -357,6 +377,7 @@ async function commandEvaluate(args: ParsedArgs): Promise<number> {
     // Only the advanced system reads a budget; passing it unconditionally would be
     // harmless but misleading in the run record.
     budget: system === ADVANCED_SYSTEM_NAME ? loadExplorationBudget(args.budget) : undefined,
+    precisionPolicy: system === ADVANCED_SYSTEM_NAME ? loadPrecisionPolicy(args.precision) : undefined,
     caseDelaySeconds: args.caseDelaySeconds,
     logger: (message) => process.stderr.write(`${message}\n`),
   });
