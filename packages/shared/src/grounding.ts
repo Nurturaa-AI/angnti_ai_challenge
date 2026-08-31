@@ -85,6 +85,26 @@ export function countClaims(body: AnalysisBody): number {
   return body.components.length + body.flows.length + body.dependencies.length + body.risks.length + 1;
 }
 
+/**
+ * A reusable "would this citation survive grounding?" predicate over one set of
+ * sources.
+ *
+ * Exported so that a caller running *before* `groundAnalysis` can ask the question
+ * without answering it differently: the predicate is the same `verify` the grounding
+ * layer uses, so the two can never drift into disagreeing about what the ledger
+ * proves. It builds the source index once, which is why it returns a function rather
+ * than taking a citation directly.
+ *
+ * It reports; it does not act. Dropping a citation and recording why remains
+ * `groundAnalysis`'s job alone.
+ */
+export function createCitationVerifier(
+  sources: readonly ContextSourceText[],
+): (item: Evidence) => boolean {
+  const index = buildSourceIndex(sources);
+  return (item: Evidence): boolean => verify(item, index).grounded;
+}
+
 interface SourceIndex {
   byId: Map<string, ContextSourceText>;
   byLowerId: Map<string, ContextSourceText>;

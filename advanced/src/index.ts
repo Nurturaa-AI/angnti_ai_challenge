@@ -8,12 +8,14 @@ import {
   RunRecordSchema,
   TOOL_DEFINITIONS,
   TrajectoryRecorder,
+  applyEvidencePrecision,
   collectRepositoryContext,
   createLlmClient,
   estimateCostUsd,
   executeTool,
   groundAnalysis,
   loadExplorationBudget,
+  loadPrecisionPolicy,
   parseModelJson,
   runEvidenceScout,
   slugify,
@@ -26,6 +28,7 @@ import {
   type ExplorationBudget,
   type ExplorationSummary,
   type LlmClient,
+  type PrecisionPolicy,
   type RunRecord,
   type TokenUsage,
   type ToolCall,
@@ -55,6 +58,13 @@ import { ADVANCED_RESPONSE_SCHEMA, ADVANCED_SYSTEM_INSTRUCTION, buildReconnaissa
  * model's own text can never be the thing that authorises a citation. If it claims
  * to have read a file that was never opened, the citation is dropped and the claim
  * is recorded as unsupported — visibly, in the audit and in the trajectory.
+ *
+ * Iteration 3 adds one deterministic step between synthesis and grounding. The model
+ * chose *which* of its evidence to cite, and iteration 2's two remaining failures were
+ * both that choice going wrong rather than the retrieval: a correct answer, a grounded
+ * citation, the wrong source. The precision pass revisits that choice using nothing but
+ * the citations and the ledger — it opens no file and calls no model — and grounding
+ * still has the last word on everything it produces.
  */
 
 export const ADVANCED_SYSTEM_NAME = "advanced";
@@ -65,6 +75,12 @@ export interface RunAdvancedOptions {
   config: AnalysisConfig;
   /** Defaults to the budget from environment and defaults. */
   budget?: ExplorationBudget;
+  /**
+   * How the post-synthesis precision pass is allowed to edit citations. Defaults to
+   * the policy from environment and defaults; set `maxCorroborations: 0` to run the
+   * pass in hygiene-only mode, which is iteration 3's control condition.
+   */
+  precisionPolicy?: PrecisionPolicy;
   /** Injectable for tests; defaults to a client built from `config`. */
   client?: LlmClient;
   collectOptions?: CollectOptions;
@@ -87,6 +103,7 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
   const startedAt = now();
   const trajectory = new TrajectoryRecorder(() => now().getTime());
   const budget = options.budget ?? loadExplorationBudget();
+  const precisionPolicy = options.precisionPolicy ?? loadPrecisionPolicy();
 
   const client = options.client ?? createLlmClient(options.config);
   if (!client.generateWithTools) {
@@ -307,9 +324,17 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
     risks: body.risks.length,
   });
 
-  // 6. Grounding, against the ledger rather than against the initial context.
+  // 6. Evidence precision, over the citations the model produced and the ledger it
+  //    produced them from. Deterministic, no model call, and no file opened: it
+  //    removes citations another citation already carries and attaches ledger
+  //    artefacts the model had but did not cite. Grounding still runs afterwards,
+  //    so nothing here can put an unverifiable citation into the briefing.
   const sources = ledger.toArray();
-  const { body: groundedBody, audit } = groundAnalysis(body, sources);
+  const { body: refinedBody, summary: precision } = applyEvidencePrecision(body, sources, precisionPolicy);
+  trajectory.step("refine-evidence", { ...precision });
+
+  // 7. Grounding, against the ledger rather than against the initial context.
+  const { body: groundedBody, audit } = groundAnalysis(refinedBody, sources);
   trajectory.step("ground-evidence", {
     ledgerSources: sources.length,
     claimed: audit.claimed,
@@ -341,6 +366,7 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
     budgetExhausted,
     budget: { ...budget },
     scout: scout.summary,
+    precision,
   };
 
   const record: RunRecord = {

@@ -556,6 +556,7 @@ describe("runAdvanced — the trajectory", () => {
       "build-synthesis-prompt",
       "synthesis-call",
       "validate-schema",
+      "refine-evidence",
       "ground-evidence",
     ]);
     // The ordering is the point of iteration 2, not an accident of this list: the
@@ -563,6 +564,10 @@ describe("runAdvanced — the trajectory", () => {
     // model is reasoning about evidence rather than about which filename to guess.
     expect(actions.indexOf("scout-search")).toBeLessThan(actions.indexOf("model-turn"));
     expect(actions.indexOf("scout-read")).toBeLessThan(actions.indexOf("build-recon-prompt"));
+    // Iteration 3's ordering, for the same reason: precision edits citations, then
+    // grounding judges them. Reversing the two would let the pass put a citation into
+    // the briefing that nothing had verified.
+    expect(actions.indexOf("refine-evidence")).toBeLessThan(actions.indexOf("ground-evidence"));
     for (const step of record.trajectory) {
       expect(typeof step.at).toBe("string");
       expect(step.durationMs).toBeGreaterThanOrEqual(0);

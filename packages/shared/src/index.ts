@@ -6,6 +6,7 @@ export * from "./grounding";
 export * from "./json";
 export * from "./llm";
 export * from "./paths";
+export * from "./precision";
 export * from "./render";
 export * from "./repo";
 export * from "./schemas";
