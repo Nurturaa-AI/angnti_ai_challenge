@@ -39,6 +39,9 @@ importers:
       '@repo-arch/advanced':
         specifier: workspace:*
         version: link:../../advanced
+      '@repo-arch/app':
+        specifier: workspace:*
+        version: link:../../packages/app
       '@repo-arch/baseline':
         specifier: workspace:*
         version: link:../../baseline
@@ -48,6 +51,18 @@ importers:
       '@repo-arch/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+
+  apps/web:
+    dependencies:
+      '@repo-arch/app':
+        specifier: workspace:*
+        version: link:../../packages/app
+      '@repo-arch/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      zod:
+        specifier: ^4.5.4
+        version: 4.5.4
 
   baseline:
     dependencies:
@@ -72,6 +87,21 @@ importers:
       '@repo-arch/shared':
         specifier: workspace:*
         version: link:../packages/shared
+      zod:
+        specifier: ^4.5.4
+        version: 4.5.4
+
+  packages/app:
+    dependencies:
+      '@repo-arch/advanced':
+        specifier: workspace:*
+        version: link:../../advanced
+      '@repo-arch/baseline':
+        specifier: workspace:*
+        version: link:../../baseline
+      '@repo-arch/shared':
+        specifier: workspace:*
+        version: link:../shared
       zod:
         specifier: ^4.5.4
         version: 4.5.4

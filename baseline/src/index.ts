@@ -14,6 +14,7 @@ import {
   validateWithSchema,
   type AnalysisConfig,
   type CollectOptions,
+  type ContextSourceText,
   type LlmClient,
   type RunRecord,
 } from "@repo-arch/shared";
@@ -42,6 +43,18 @@ export interface RunBaselineOptions {
   collectOptions?: CollectOptions;
   /** Injectable for deterministic run ids in tests. */
   now?: () => Date;
+  /**
+   * Receives the collected context — sources *with their text* — once collection is done.
+   *
+   * The baseline has no ledger beyond its reconnaissance context, so this is that
+   * context. The run record carries only source metadata (`meta.contextSources`), which
+   * cannot serve a citation back to a reader; a consumer that needs the bytes asks for
+   * them here rather than re-collecting and hoping the two passes agree.
+   *
+   * Strictly an observation: it cannot add to what the run may cite, and a run with no
+   * callback behaves identically to one before this option existed.
+   */
+  onSources?: ((sources: readonly ContextSourceText[]) => void) | undefined;
 }
 
 export async function runBaseline(options: RunBaselineOptions): Promise<RunRecord> {
@@ -51,6 +64,7 @@ export async function runBaseline(options: RunBaselineOptions): Promise<RunRecor
 
   // 1. Shallow context collection — the baseline's entire view of the repository.
   const context = collectRepositoryContext(options.repositoryPath, options.collectOptions);
+  options.onSources?.(context.sources);
   trajectory.step("collect-context", {
     sources: context.sources.map((source) => source.id),
     files: context.repository.fileCount,

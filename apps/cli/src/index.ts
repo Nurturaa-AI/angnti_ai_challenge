@@ -1,7 +1,8 @@
 #!/usr/bin/env -S npx tsx
 import path from "node:path";
-import { ADVANCED_SYSTEM_NAME, runAdvanced } from "@repo-arch/advanced";
-import { BASELINE_SYSTEM_NAME, runBaseline } from "@repo-arch/baseline";
+import { ADVANCED_SYSTEM_NAME } from "@repo-arch/advanced";
+import { analyzeRepository, type AnalysisRun } from "@repo-arch/app";
+import { BASELINE_SYSTEM_NAME } from "@repo-arch/baseline";
 import { DEFAULT_CASES_DIR, DEFAULT_RESULTS_DIR, runEvaluation } from "@repo-arch/evaluation";
 import {
   ConfigError,
@@ -294,7 +295,11 @@ async function commandAnalyze(args: ParsedArgs, system: string): Promise<number>
   const config = loadConfig(args.overrides);
   const outDir = args.out ?? "reports";
 
-  let record: RunRecord;
+  // The progress line is the CLI's own; the analysis is not. Both this command and the
+  // web application go through `analyzeRepository`, which is the only place that decides
+  // which system runs — so a briefing produced in the terminal and one produced in the
+  // browser cannot come from two slightly different orchestrations.
+  let run: AnalysisRun;
   if (system === ADVANCED_SYSTEM_NAME) {
     const budget = loadExplorationBudget(args.budget);
     const precisionPolicy = loadPrecisionPolicy(args.precision);
@@ -305,11 +310,19 @@ async function commandAnalyze(args: ParsedArgs, system: string): Promise<number>
         `precision ${precisionPolicy.maxCorroborations} corroborations/claim` +
         `${args.focus === undefined ? "" : `, focus "${args.focus}"`}\n`,
     );
-    record = await runAdvanced({ repositoryPath, config, budget, precisionPolicy, focus: args.focus });
+    run = await analyzeRepository({
+      repositoryPath,
+      system,
+      config,
+      budget,
+      precisionPolicy,
+      focus: args.focus,
+    });
   } else {
     process.stderr.write(`baseline: ${repositoryPath} via ${config.provider}/${config.model}\n`);
-    record = await runBaseline({ repositoryPath, config });
+    run = await analyzeRepository({ repositoryPath, system, config });
   }
+  const record: RunRecord = run.record;
 
   const briefing = renderBriefingMarkdown(record);
 

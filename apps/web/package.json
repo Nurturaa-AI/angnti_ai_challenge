@@ -1,0 +1,15 @@
+{
+  "name": "@repo-arch/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local web application: analyse a repository, explore the evidence, ask questions, export a report.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@repo-arch/app": "workspace:*",
+    "@repo-arch/shared": "workspace:*",
+    "zod": "^4.5.4"
+  }
+}

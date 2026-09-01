@@ -1,25 +1,36 @@
 # Architecture
 
-Three commands, six packages, no build step. The shape is driven by one constraint: the
-evaluation harness must be able to score every system with *identical* code, so that a change
+Four commands, eight workspace packages, no build step. The shape is driven by one constraint:
+the evaluation harness must be able to score every system with *identical* code, so that a change
 in the number means a change in the system rather than a change in how it was graded.
 
 ```
-                         apps/cli
-                            │
-          ┌─────────────┬───┴───────────┐
-          ▼             ▼               ▼
-      baseline      advanced        evaluation
-          │             │               │
-          └──────┬──────┘          ┌────┴─────────────┐
-                 ▼                 ▼                  ▼
-          packages/shared  ◄──  packages/evaluator   (cases/, results/)
+      apps/cli                          apps/web  ◄── browser (public/: UI, graph, Q&A)
+     baseline │ advanced │ evaluate       server, routes, static assets
+         │         │          │                     │
+         │         └────┬─────┼─────────────────────┘
+         │              ▼     │
+         └────────► packages/app  ── report · architecture graph · questions
+                        │            store · metrics · PDF export
+          ┌─────────────┴───────┐                  │
+          ▼                     ▼                  ▼
+      baseline              advanced          evaluation
+          │                     │                  │
+          └──────────┬──────────┘             ┌────┴─────────────┐
+                     ▼                        ▼                  ▼
+              packages/shared  ◄──────── packages/evaluator   (cases/, results/)
 ```
 
 `baseline` and `advanced` each produce a `RunRecord`. `evaluator` consumes a `RunRecord` and
 knows nothing about where it came from — it cannot tell which system produced one, which is
-the property that makes the two comparable. `evaluation` is the runner that joins them. Every
-arrow points one way; there are no cycles and no back-channels.
+the property that makes the two comparable. `evaluation` is the runner that joins them.
+`packages/app` is the analysis core the two *user-facing* consumers share, and `apps/web` is
+transport around it. Every arrow points one way; there are no cycles and no back-channels.
+
+The product layer (Iteration 4) is deliberately downstream of everything measured. It reads the
+pipeline's output and the pipeline's evidence ledger; it does not add a phase, skip one, or
+reorder any. The only change it required inside `runAdvanced` and `runBaseline` was one optional
+callback that hands the finished ledger to whoever asked for it.
 
 ---
 
@@ -42,7 +53,7 @@ Everything both sides must agree on, and nothing else.
 | [`cost.ts`](../packages/shared/src/cost.ts) | Token usage → dollars, for the models whose prices are published. |
 | [`trajectory.ts`](../packages/shared/src/trajectory.ts) | Records what a run did, step by step, with timings. |
 | [`paths.ts`](../packages/shared/src/paths.ts) | Portable paths and secret redaction on every write. |
-| [`errors.ts`](../packages/shared/src/errors.ts) | Typed errors carrying a hint: `RepositoryError`, `ModelError`, `SchemaError`, `ConfigError`, `EvaluationError`. |
+| [`errors.ts`](../packages/shared/src/errors.ts) | Typed errors carrying a hint: `RepositoryError`, `ModelError`, `SchemaError`, `ConfigError`, `EvaluationError`, `ToolError`, `RequestError`. |
 
 ### Two schemas, not one
 
@@ -162,10 +173,11 @@ claim that it could not back up?" — and get a number.
 
 ---
 
-## `advanced/` — search, then targeted exploration (Iterations 1–2)
+## `advanced/` — search, then targeted exploration (Iterations 1–3)
 
 [`runAdvanced`](../advanced/src/index.ts) keeps the baseline's five steps and inserts two things
 between step 2 and step 3: a deterministic **Evidence Scout**, then a bounded exploration loop.
+Iteration 3 added one more deterministic step, after the model has spoken and before grounding.
 
 ```
 collect-context ─► scout-search ─► scout-read ─► build-recon-prompt
@@ -178,8 +190,14 @@ collect-context ─► scout-search ─► scout-read ─► build-recon-prompt
                                                                   │
                                               validate-schema ◄───┘
                                                      │
+                                              refine-evidence   (Iteration 3: hygiene
+                                                     │           + corroboration, no model)
                                               ground-evidence
 ```
+
+The order of the last two is load-bearing and pinned by a test: corroboration adds citations, and
+grounding is what verifies them, so reversing the pair would let an unverified excerpt reach the
+briefing.
 
 ### The Evidence Scout (Iteration 2)
 
@@ -367,7 +385,7 @@ intact in `meta.exploration.scout` and the `scout-read` step, but a full audit o
 candidate lost is not always recoverable from the trajectory file. Documented as
 [limitation 11](evaluation.md#limitations) rather than fixed by raising a shared recorder's cap.
 
-### What Iterations 1 and 2 measured
+### What the iterations measured
 
 **Iteration 1 regressed the primary metric: 64.3 % → 57.1 %, and was rejected.** The mechanism
 worked — grounding held with zero fabrications — but the agent used only `read_file`, never
@@ -377,10 +395,217 @@ worked — grounding held with zero fabrications — but the agent used only `re
 an option fixed the question that motivated both iterations: the term `dispatch`, drawn from the
 repository's own documentation, found `pyflow/steps/__init__.py`, the scout read it, and an answer
 that had failed twice became correct and cited. Answer accuracy reached 100 %, grounding held
-again at 31 of 31 citations, and cost rose 2.77×. Full numbers, the one remaining regression, and
-the reason mean evidence relevance fell while the primary metric rose are in
-[`improvement-changelog.md`](improvement-changelog.md).
+again at 31 of 31 citations, and cost rose 2.77×.
 
+**Iteration 3 raised it to 100 % (14/14) for zero additional tokens, and is kept.** The precision
+pass runs after synthesis, so the prompts were byte-identical to Iteration 2's and the model
+produced the same output twice: the same output scored 85.7 % with Iteration 2's citations and
+100 % with Iteration 3's. On the stronger `gemini-3.5-flash` it ties its own baseline at 78.6 %,
+and mean evidence relevance fell by a third — both reported rather than buried.
+
+**Iteration 4 measured nothing, and claims nothing.** It is the product layer: a browser, a
+graph, grounded Q&A and a PDF, all downstream of a pipeline it did not modify. The only
+evaluation runs made for it were offline `--mock` runs, which measure the harness and its canned
+text rather than a model.
+
+Full numbers, the regressions, and the reason mean evidence relevance moved the wrong way twice
+are in [`improvement-changelog.md`](improvement-changelog.md).
+
+
+---
+
+## `packages/app` — the analysis core (Iteration 4)
+
+The product layer's whole vocabulary. Nothing here starts a server, parses an argument or writes
+a file; those belong to the things that have a user.
+
+| Module | Responsibility |
+| --- | --- |
+| [`service.ts`](../packages/app/src/service.ts) | `analyzeRepository` — the one place that decides which system runs. |
+| [`report.ts`](../packages/app/src/report.ts) | `RunRecord` → `AnalysisReport`: interned evidence, per-claim citations, origins, metrics. |
+| [`architecture.ts`](../packages/app/src/architecture.ts) | `AnalysisReport` → `ArchitectureGraph`: typed nodes, typed edges, deterministic layout. |
+| [`questions.ts`](../packages/app/src/questions.ts) | The grounded question loop: scout, tools, answer, citation extraction, grounding. |
+| [`question-prompt.ts`](../packages/app/src/question-prompt.ts) | The question's prompt and its JSON contract. |
+| [`store.ts`](../packages/app/src/store.ts) | `AnalysisStore` and the bounded in-memory default. |
+| [`workspace.ts`](../packages/app/src/workspace.ts) | `resolveRepositoryRequest` — a client-supplied name → a directory inside the workspace. |
+| [`metrics.ts`](../packages/app/src/metrics.ts) | `ObservabilityRecorder`: analysis, question and export events. |
+| [`export/`](../packages/app/src/export/) | The `ReportExporter` seam, the PDF exporter, and a minimal PDF 1.4 writer. |
+
+### One core, two consumers
+
+`analyzeRepository` is the only code outside the evaluator that branches on system identity. The
+CLI's `commandAnalyze` and the web server's `POST /api/analyze` both call it, so a briefing
+produced in a terminal and one produced in a browser cannot come from two slightly different
+orchestrations. It adds no phase and skips none: `runBaseline` and `runAdvanced` still own the
+pipeline. The one thing it adds is the ledger — `AnalysisRun.sources`, the artefacts *with their
+text*, captured through the `onSources` callback.
+
+That callback is the entire footprint of Iteration 4 inside the measured pipeline. It is called
+after the ledger is final, it cannot add to it, and nothing reads its return value. A run that
+passes no callback behaves exactly as it did before the option existed, which is what makes the
+product layer unable to move a benchmark number.
+
+The alternative — re-collecting the repository to recover the bytes — was rejected as *dishonest*
+rather than merely slow: a second pass under a different budget can produce a different ledger,
+and then the evidence panel would be showing a reader text that the briefing was never checked
+against.
+
+### The evidence model, end to end
+
+The chain the whole product exists to preserve:
+
+```
+file on disk ──► tool call ──► ledger (raw text) ──► model citation ──► grounding ──► ReportEvidence
+   boundary        recorded       the only citable      source+excerpt     verified      ev-001, origin,
+   checked         bytes          artefacts             as written         or dropped    offsets on demand
+```
+
+`buildAnalysisReport` **interns** each surviving citation as `ev-001`, `ev-002`, … in traversal
+order, and every claim then refers to its evidence by id. That is what makes a citation a thing
+the UI can address: a node in the graph, a row in the evidence table and a claim in the briefing
+all point at the same `ev-013` rather than each carrying its own copy of a quotation.
+
+Each evidence item records how its artefact reached the ledger — `reconnaissance`, `scout`,
+`model-tool` or `corroboration` — which is per *source* rather than per citation, and is
+documented as a limitation in the code where it is defined. An evidence id is a key into one
+analysis: `GET /api/analysis/:id/evidence/:evidenceId` resolves it against the analysis that
+issued it and 404s otherwise, so an id cannot be constructed, guessed, or carried across
+analyses.
+
+A claim that lost its last citation is **kept and labelled unsupported** in the report, the graph
+and the PDF. Hiding it would flatter the system; showing it tells a reader which sentences to
+distrust.
+
+### The architecture graph
+
+Eleven node types (`application`, `package`, `module`, `api`, `database`, `queue`, `worker`,
+`external-service`, `cli`, `configuration`, `test-suite`) and ten relationships (`imports`,
+`calls`, `depends-on`, `reads-from`, `writes-to`, `publishes`, `consumes`, `tests`, `exposes`,
+`configures`). `assertNodeType` and `assertRelationship` reject anything else at construction
+rather than letting an unrecognised string reach the renderer, where it would draw as an
+unlabelled arrow.
+
+Two properties are enforced by test. **Every node and every edge carries `evidenceIds`** — the
+graph is derived from claims that already have citations, so an element with no evidence is a
+drawing rather than a finding, and `buildArchitectureGraph` cannot emit one. And **the same
+report produces the same graph**: ids are derived from the report's own content, ordering is
+stable, and layout is computed arithmetically from the node list rather than by a force
+simulation, so a screenshot is reproducible and a diff is meaningful.
+
+### Questions, answered the same way claims are
+
+`answerQuestion` reuses the pipeline's parts rather than re-implementing them: the same evidence
+scout, the same three read-only tools, the same repository boundary, the same ledger, the same
+grounding.
+
+```
+question ─► scout (deterministic) ─► ≤ 4 tool calls over ≤ 3 turns ─► answer + citations
+                                                                          │
+                                              grounded against the ledger ◄┘
+                                                     │
+                                     verified answer │ or the unsupported sentence
+```
+
+Four bounds, each smaller than the briefing's, because a question has to settle one thing rather
+than cover a repository: `maxToolCalls: 4`, `maxTurns: 3`, `maxScoutFiles: 3`, and a 1 000-character
+limit on the question itself. There is no unbounded loop and no way to ask for one.
+
+Two rules matter more than the loop. A citation the ledger cannot resolve is dropped, and an
+answer left with nothing verified is replaced — not softened — with exactly *"I couldn't verify
+this from the repository evidence I inspected."* And **conversation history never becomes
+evidence**: earlier turns are replayed as context, capped at six, and the only thing that can be
+cited is repository bytes. A model that quotes its own previous answer has cited nothing.
+
+### The store, and the export seam
+
+`AnalysisStore` is two methods plus a listing. The default is a bounded map — sixteen entries,
+oldest evicted, re-saving an existing id does not change its age — which is the right failure for
+a tool someone runs locally against one repository at a time, and the wrong one for a shared
+service. That is a reason to write a persistent implementation, not to raise the cap; nothing in
+the interface knows about a database.
+
+`ReportExporter` is `{ format, contentType, filename(report), export(input) }`. The one
+implementation renders a PDF. It has no dependency and starts no browser:
+[`export/pdf/writer.ts`](../packages/app/src/export/pdf/writer.ts) is a minimal PDF 1.4 writer —
+standard fonts only, no compression, tabulated font metrics — and the exporter above it owns
+layout. `redactSecrets` runs inside the exporter, because a PDF is a file that leaves the machine.
+
+The spec's `export(report)` was widened to `export({ report, graph, questions })`. A document that
+omitted the architecture and the answered questions would not be an export of what the reader is
+looking at.
+
+The writer's unit tests assert on the *document* — that a claim, its citation and the unsupported
+label all appear, and that a secret-shaped excerpt appears redacted. They deliberately do not assert
+on the file format, because a test that encodes the byte offsets of an xref table breaks whenever a
+line of layout changes and tells you nothing about the product. That check lives separately in
+[`scripts/pdf-smoke.ts`](../scripts/pdf-smoke.ts), run by hand
+(`pnpm exec tsx scripts/pdf-smoke.ts`), and it verifies the things only the format can be wrong
+about: every xref offset points at the object it claims, `/Size` matches the table, the file ends in
+`%%EOF`, parentheses and backslashes in metadata are escaped, and characters outside WinAnsi are
+substituted rather than emitted raw.
+
+---
+
+## `apps/web` — transport, and nothing else
+
+| Module | Responsibility |
+| --- | --- |
+| [`server.ts`](../apps/web/src/server.ts) | `node:http`, the three refusals at the door, security headers, JSON and byte responses. |
+| [`routes.ts`](../apps/web/src/routes.ts) | The eight routes, request validation in Zod, and the public projection of an analysis. |
+| [`static.ts`](../apps/web/src/static.ts) | The UI's own files, held inside their directory by the repository boundary. |
+| [`main.ts`](../apps/web/src/main.ts) | Flag parsing, `.env`, config and budget loading — deliberately shaped like the CLI's. |
+| [`public/`](../apps/web/public/) | The UI: one HTML shell, one stylesheet, one script. No framework, no build, no CDN. |
+
+```
+GET  /api/health                                  provider, model, systems, limits
+GET  /api/repositories                            analysable directories in the workspace
+POST /api/analyze                    {repository, system?, focus?}   → 201 report + graph
+GET  /api/analyses                                what has been analysed this session
+GET  /api/analysis/:id                            report + graph + answered questions
+POST /api/questions                  {analysisId, question}          → 201 answered question
+GET  /api/analysis/:id/evidence/:evidenceId       one citation, its source text, its offsets
+GET  /api/analysis/:id/export/pdf                 the document
+```
+
+### The three refusals at the door
+
+A local web server that reads files is a capability a page on the internet would like to borrow,
+so three checks run before any route does:
+
+- **`Host` must be localhost** → `421 Misdirected Request`. This is the DNS-rebinding defence: a
+  name that resolves to `127.0.0.1` still arrives with its own `Host`.
+- **`Origin`, if present, must be our own** → `403`. A navigation sends none, which is why the PDF
+  download works and a cross-site `fetch` does not.
+- **A body over 1 MiB** → `413`, refused while it arrives rather than after it is buffered.
+
+Then `default-src 'none'` and four more headers on every response, including
+`cache-control: no-store`. The dashboard renders names, paths and excerpts taken from a repository
+nobody vetted; the CSP is what makes a successful injection inert. The UI has no framework
+partly for that reason — there is no `unsafe-inline` to grant and no CDN to trust.
+
+`publicAnalysis` is the projection that leaves the process: `{ id, createdAt, report, graph,
+questions }`. The run record, the ledger text and the absolute repository root stay in memory. The
+repository path a report carries is the workspace-relative one the client named, not the server's
+own path to it.
+
+### Security boundaries, in one place
+
+| Boundary | Mechanism | Where |
+| --- | --- | --- |
+| A path inside a repository | `resolveInsideRepository` | [`tools/boundary.ts`](../packages/shared/src/tools/boundary.ts) |
+| A repository inside the workspace | `resolveRepositoryRequest`, which calls it and additionally rejects ignored directories, missing paths and non-directories | [`workspace.ts`](../packages/app/src/workspace.ts) |
+| A static asset inside `public/` | the same function again | [`static.ts`](../apps/web/src/static.ts) |
+| A citation | must resolve to a ledger artefact | [`grounding.ts`](../packages/shared/src/grounding.ts) |
+| An evidence id | a key into one analysis, scoped to it | [`routes.ts`](../apps/web/src/routes.ts) |
+| Text leaving the process | `redactSecrets` on responses, metrics, files and the PDF | [`paths.ts`](../packages/shared/src/paths.ts) |
+
+There is **one** path-security mechanism, used three times. A second one written for "just the
+static files" is how a traversal bug reaches production: nobody audits the asset server. The
+consequence of reuse is that the asset checks are stricter than a static server needs, which is
+the right direction to be wrong in.
+
+Everything is read-only. No shell, no command execution, no write to an analysed repository, and
+no filesystem access outside a resolved boundary.
 
 ---
 
@@ -466,9 +691,30 @@ JSON-serialised form (`"GEMINI_API_KEY": "…"`) specifically, because that is h
 most plausibly reach a report, and it replaces the value with a *quoted* placeholder so the
 surrounding JSON stays parseable. That case was found by a test, not by inspection.
 
+Iteration 4 extended it **additively**, because a report is no longer the only thing that leaves:
+an HTTP response, a metric event and a PDF do too, and each may carry an excerpt from a file that
+committed a token. A second rule now matches credential *shapes* anywhere in the text — AWS key
+ids, GitHub and Slack tokens, Stripe and Anthropic keys, JWTs and whole PEM private-key blocks.
+Shape-based rather than name-based, because nobody writes `AKIA` plus sixteen uppercase
+alphanumerics by accident; the name-based rule is deliberately *not* widened to
+`secret`/`token`/`password`, since `jwtSecret: env.JWT_SECRET` is a reference to a credential
+rather than a credential, and redacting it would make evidence less readable while protecting
+nothing. The `<redacted-api-key>` wording an existing test pins is unchanged.
+
+Two consequences worth stating. It cannot recognise a bare high-entropy string with no prefix and
+no label — a heuristic wide enough for that would redact hashes, UUIDs and minified code. And
+redaction runs at *exit* boundaries only: the evidence ledger holds raw bytes, because grounding
+has to verify an excerpt against what the file actually says. Evaluation scores the in-memory
+record, so no change to redaction can move a benchmark number.
+
 **Where the next system plugs in.** A new system implements the same
 `(repositoryPath, config) → RunRecord` contract and registers a system name in
 `EVALUABLE_SYSTEMS`. `runEvaluation` already takes `system` and already rejects an unknown one.
-Nothing in `packages/evaluator` needed to change to score Iteration 1 or Iteration 2 — no new
+Nothing in `packages/evaluator` needed to change to score Iterations 1, 2 or 3 — no new
 evidence type, no new matching rule, no scoring exemption — which is the whole reason the harness
-was built first, and the reason both the rejected 57.1 % and the kept 85.7 % are worth believing.
+was built first, and the reason both the rejected 57.1 % and the kept 100 % are worth believing.
+
+**Where a product feature plugs in.** Downstream of `packages/app`, reading an `AnalysisReport`
+and an `ArchitectureGraph`, never reaching past them into the pipeline. That is the rule that lets
+a UI, a graph, a question mode and an exporter be added without touching a measured code path —
+and the reason Iteration 4 can be honest about having measured nothing.

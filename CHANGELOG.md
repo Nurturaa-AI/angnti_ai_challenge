@@ -7,6 +7,177 @@ All notable changes to Repo Archaeologist. Format loosely follows
 
 Nothing yet. See [`## Next`](#next) for what the following iteration has to address.
 
+## [0.5.0] — 2026-09-01
+
+Iteration 4: the Interactive Product Layer. A web application, an architecture graph, a grounded
+question mode and a PDF exporter, all **downstream** of the analysis pipeline. **No benchmark
+improvement is claimed and none was measured**, because nothing on the measured path changed
+behaviourally — see [Measurement](#iteration-4-measurement) below for what was and was not run.
+
+### Added — `packages/app`, the analysis core
+
+One core, two consumers. `analyzeRepository` is now the only place outside the evaluator that
+decides which system runs; the CLI's `commandAnalyze` and the web server's `POST /api/analyze`
+both call it, so a briefing produced in a terminal and one produced in a browser cannot come from
+two different orchestrations.
+
+- `service.ts` — the core. Adds no phase, skips none, reorders nothing: `runBaseline` and
+  `runAdvanced` still own the pipeline. It carries out one extra thing, the evidence ledger *with
+  text*, which two later features need and neither may guess at.
+- `report.ts` — `RunRecord` → `AnalysisReport`: citations interned as `ev-001`, `ev-002`, … in
+  traversal order, claims referring to them by id, per-source origin (`reconnaissance`, `scout`,
+  `model-tool`, `corroboration`), six dashboard sections, run metrics. Additive: the existing
+  schemas are untouched and a report is derived from a record, never in place of one.
+- `architecture.ts` — `AnalysisReport` → `ArchitectureGraph`. Eleven node types, ten
+  relationships, both closed sets with `assertNodeType` / `assertRelationship` rejecting anything
+  else at construction. Every node and every edge carries `evidenceIds`; layout is arithmetic
+  rather than a force simulation, so the same report yields the same graph.
+- `questions.ts`, `question-prompt.ts` — the grounded question loop, reusing the same scout, the
+  same three read-only tools, the same boundary, the same ledger and the same grounding. Bounded
+  at 4 tool calls, 3 turns, 3 scout reads, 6 replayed history turns and a 1 000-character
+  question. Conversation history is context and never evidence.
+- `store.ts` — `AnalysisStore` (`save` / `get` / `list`) and a bounded in-memory default: 16
+  entries, oldest evicted, re-saving an id does not change its age. No database.
+- `workspace.ts` — `resolveRepositoryRequest`: a client-supplied repository name resolved inside
+  the workspace by the **existing** boundary, plus rejections for ignored directories, missing
+  paths and non-directories.
+- `metrics.ts` — `ObservabilityRecorder`, three event kinds (analysis, question, export), with
+  `redactSecrets` applied on record.
+- `export/` — the `ReportExporter` seam, `PdfReportExporter`, and `export/pdf/writer.ts`: a
+  minimal PDF 1.4 writer, no dependency and no browser. Standard fonts only, no compression,
+  tabulated metrics.
+
+### Added — `apps/web`, transport and a UI
+
+- `server.ts` — `node:http`, loopback-only by default (`127.0.0.1:4173`). Three refusals before
+  any route runs: a non-localhost `Host` → **421** (the DNS-rebinding defence), a foreign `Origin`
+  → **403**, a body over 1 MiB → **413** without buffering it. Five security headers on every
+  response, `default-src 'none'` among them, `cache-control: no-store`.
+- `routes.ts` — eight routes, request bodies validated with `z.strictObject`. `publicAnalysis` is
+  the projection that leaves the process: the run record, the ledger text and the absolute
+  repository root stay in memory.
+- `static.ts` — the UI's own files, held inside their directory by `resolveInsideRepository`
+  rather than by a second path check. Eight allowed extensions; every failure is a 404, so "not
+  allowed" is indistinguishable from "not there".
+- `main.ts` — `pnpm web`, shaped like the CLI's entry point and using the same `loadConfig`,
+  `loadExplorationBudget`, `loadPrecisionPolicy` and `.env` handling, so a repository analysed
+  from the browser runs under the same bounds as one analysed from the terminal.
+- `public/` — one HTML shell, one stylesheet, one script. No framework, no build step, no CDN:
+  partly because the iteration's rule is to prefer what is already here, and partly because a CSP
+  with no `unsafe-inline` and no third-party origin is only possible if nothing needs them.
+
+### Added — three product routes and five supporting ones
+
+`POST /api/analyze`, `POST /api/questions`, `GET /api/analysis/:id`,
+`GET /api/analysis/:id/evidence/:evidenceId`, `GET /api/analysis/:id/export/pdf`, plus
+`GET /api/health`, `GET /api/repositories` and `GET /api/analyses`.
+
+An evidence id is a key into one analysis, not a path: an id from another analysis is a 404, and
+the error says so — *"Evidence ids come from a report or an answered question; they cannot be
+constructed."*
+
+### Added — tests
+
+94 new tests, 397 → **491**, all passing, offline, with the model mocked. **No existing test was
+modified, weakened or deleted** — the five new files are new, and the only edit to an existing
+test file is 12 added cases in `packages/shared/test/paths.test.ts`.
+
+- `apps/web/test/api.test.ts` (36) — the routes called as functions: valid and invalid analyse
+  requests, boundary rejection, retrieval, missing analysis, question execution and grounding,
+  evidence lookup and scoping, PDF metadata, error shapes.
+- `apps/web/test/integration.test.ts` (9) — the whole product over a real socket on a real port:
+  analyse → dashboard → question → evidence → export, plus the CSP, the `Host` and `Origin`
+  checks, the body cap, static-asset traversal, the workspace boundary over HTTP, and metrics.
+- `packages/app/test/questions.test.ts` (14), `architecture.test.ts` (11), `pdf.test.ts` (12) —
+  the unsupported-answer path, follow-ups, budget exhaustion, node and edge generation, evidence
+  association, unsupported-relationship rejection, determinism, PDF structure, metadata,
+  architecture and citation inclusion, unsupported-claim labelling, and redaction.
+- `packages/shared/test/paths.test.ts` (+12) — the extended redaction: seven credential shapes
+  found mid-excerpt, a whole PEM block, the pinned `<redacted-api-key>` wording, and the
+  deliberate non-matches (a reference like `env.JWT_SECRET`, a commit hash, a uuid, a sha256
+  digest, and a bare high-entropy string, which is a documented limit rather than a bug).
+
+`vitest.config.ts` gained one line: `"apps/*/test/**/*.test.ts"`.
+
+### Changed — additive extensions to shared code
+
+- `runAdvanced` / `runBaseline` accept an optional `onSources` callback, invoked once after the
+  evidence ledger is final. It cannot add to the ledger, nothing reads its return value, and a run
+  that passes no callback behaves exactly as before. This is the **entire** footprint of the
+  iteration inside the measured pipeline. The alternative — re-collecting to recover the bytes —
+  was rejected as dishonest rather than slow: a second pass can produce a different ledger, and
+  then the evidence panel would show text the briefing was never checked against.
+- `packages/shared/src/errors.ts` — a new `RequestError` (with a `notFound` flag), so a handler
+  can distinguish a caller's mistake from an operator's misconfiguration or a model's bad tool
+  call without inspecting message text.
+- `packages/shared/src/grounding.ts` — `createSourceResolver`, built from the same `resolveSource`
+  grounding itself uses, so the layer that *displays* a citation cannot disagree with the layer
+  that *verified* it about which artefact it points at.
+- `packages/shared/src/paths.ts` — `redactSecrets` extended with shape-based credential patterns
+  (AWS key ids, GitHub and Slack tokens, Stripe and Anthropic keys, JWTs, PEM private-key blocks),
+  because an HTTP response, a metric and a PDF now leave the process carrying excerpts from files
+  nobody vetted. One mechanism, not a second: the name-based rule is unchanged and deliberately
+  not widened to `secret`/`token`/`password`. Verified not to alter anything on the measured path
+  — every file under `fixtures/` (146, counting the generated git objects), both evaluation cases,
+  both evaluator sources and all 13 reports and 36 trajectories on disk are byte-identical through
+  it: 0 of 199 altered.
+- `packages/shared/src/mock-llm.ts` — the mock now answers a question contract as well as a
+  briefing contract, detected by schema *shape* (`answer` + `citations`) so the mock still sees
+  only what a real model sees. The briefing schema has neither property, so the briefing path is
+  unchanged; every citation the mock emits is quoted out of a `read_file` output really present in
+  the conversation, which is what lets the whole grounded-answer path be exercised offline.
+- `apps/cli/src/index.ts` — `commandAnalyze` now calls `analyzeRepository` instead of branching on
+  the system itself. Same arguments, same record, same output files; the duplicated branch is gone.
+  Verified by running both commands against a fixture.
+
+<a name="iteration-4-measurement"></a>
+### Measurement
+
+**No paid evaluation run was made for this iteration, and no benchmark improvement is claimed.**
+
+The reason is structural. Everything added sits downstream of the pipeline; the only change inside
+it is an optional observer callback the evaluator does not pass. Re-measuring the same pipeline to
+report the same number would be theatre, and calling the result an improvement would be worse.
+Iteration 3's figures stand as the last real measurement, unedited.
+
+`DEFAULT_MODEL` is now `gemini-3.7-flash`, which no historical run used, so a bare
+`pnpm evaluate:advanced` would produce a figure comparable to nothing. A comparable pair needs
+`--model gemini-3.5-flash-lite --case-delay 20` on both systems — and it would be re-measuring
+code that did not change.
+
+What was run, for compatibility rather than for a number — both offline, on the deterministic mock
+provider:
+
+| | Baseline `--mock` | Advanced `--mock` |
+| --- | --- | --- |
+| Run id | `eval-baseline-2026-09-01T22-56-31Z` | `eval-advanced-2026-09-01T22-56-51Z` |
+| Evidence-backed task accuracy | 21.4 % (3/14) | 28.6 % (4/14) |
+| Answer accuracy | 21.4 % (3/14) | 28.6 % (4/14) |
+| Fabrications / dropped citations / unsupported answers | 0 / 0 / 0 | 0 / 0 / 0 |
+| Failed cases | 0 / 2 | 0 / 2 |
+
+These are **not** a measurement of any system's quality, and the harness prints its own caveat
+saying so: the mock returns canned text assembled from the context it was handed. They are
+reported to show both evaluation commands still execute end to end. Both figures reproduced
+exactly across two independent runs, before and after the CLI was refactored onto
+`analyzeRepository`, which is the check that mattered — the refactor changed how the run is
+dispatched, and a difference here would have meant it changed what the run does.
+
+Three integrity properties, each checkable: no evaluation case was modified (question,
+`expectedEvidence` or keyword); the evaluator remains question-blind, and the sentinel test that
+asserts no question text reaches the model still passes; and no fixture name, expected answer,
+expected keyword or fixture-derived architecture relationship appears in the product layer's code.
+The question mode does aim the scout at a question — that is a reader's question at runtime, and
+the evaluation path never calls it.
+
+### Versioning
+
+Root `0.4.0` → `0.5.0`. Per-package versions stay at `0.1.0`, and `ADVANCED_VERSION` /
+`BASELINE_VERSION` stay at `0.1.0` deliberately: run records stamp the *system* version, and this
+iteration did not change how either system behaves. Bumping it would assert a difference that does
+not exist and would stamp a new version on results measured under the old one. Item 3 of
+[`## Next`](#next) belongs to the next *measured* iteration, before its runs.
+
 ## [0.4.0] — 2026-08-31
 
 Iteration 3: the Evidence Precision Pass. Measured, and **kept** — 100.0 % evidence-backed task
@@ -508,12 +679,9 @@ nothing in this release claims the results are good.
 
 ## Next
 
-Iteration 3 closed the first item that stood here, and not in the way it was written: rather than
-widening `expectedEvidence` — which the iteration was explicitly forbidden to touch — it taught the
-system to also cite the source the case named, which is the same fix seen from the other side and
-does not move the goalposts. `pyflow/q3-execution-order` and `orders-api/q4-auth-boundary`, the two
-questions that artefact had been costing since Iteration 1, are now both evidence-backed. What
-remains, in order:
+Iteration 4 closed none of these, and did not try to: it was a productization iteration, measured
+against the claim that it left the pipeline alone rather than against the benchmark. The list below
+is unchanged in substance from Iteration 3's, because nothing in Iteration 4 addressed it.
 
 1. **Grow the dataset. This is now blocking.** `gemini-3.5-flash-lite` is at 14/14, so the primary
    metric has no headroom left on this dataset and the next iteration cannot be measured on it at
@@ -521,7 +689,9 @@ remains, in order:
    at 11/14 and is a harder test, but its three remaining failures are all `citedEvidence = 0`,
    which is a synthesis problem rather than a citation one. A third fixture in a language neither
    current one uses would also test whether the scout's term extraction generalises past JavaScript
-   and Python vocabulary. Nothing else on this list is worth doing first.
+   and Python vocabulary. Nothing else on this list is worth doing first. Iteration 4 raised the
+   stakes on it slightly: the default model is now `gemini-3.7-flash`, so the next measured run
+   needs an explicit `--model` on both systems to compare with anything recorded above.
 2. **Decide what mean evidence relevance is for, and then fix corroboration to respect it.** It has
    now moved the wrong way twice while the primary metric moved the right way, and this time by a
    third of its value: the pass adds two corroborations per claim unconditionally up to the cap, so
@@ -530,14 +700,25 @@ remains, in order:
    treating a verified-but-unexpected citation as a miss — and make corroboration conditional on the
    claim's existing citations being weak rather than unconditional. The bounds already exist
    (`--max-corroborations`); what is missing is a rule for when to spend them.
-3. **Give the advanced system a version of its own.** Every result record still reports
-   `systemVersion` `0.1.0` for the advanced system, unchanged across three iterations, so the run
-   artefacts cannot tell you which iteration produced them. Bump `ADVANCED_VERSION` at the *start*
-   of the next iteration, before any measurement, so the code and the evidence agree. It was left
-   alone here because changing it after the runs would have stamped a version on results that were
-   measured under another.
+3. **Give the advanced system a version of its own.** Still open. Every result record reports
+   `systemVersion` `0.1.0` for the advanced system, unchanged across four iterations, so the run
+   artefacts cannot tell you which iteration produced them. Iteration 4 deliberately left it alone
+   for a different reason than Iteration 3 did: Iteration 3 had already taken its measurements and
+   bumping afterwards would have stamped a new version on old results, whereas Iteration 4 changed
+   no system behaviour at all, so a bump would assert a difference that does not exist. Bump
+   `ADVANCED_VERSION` at the *start* of the next iteration that actually changes the pipeline,
+   before any measurement, so the code and the evidence agree.
 4. **Then re-measure.** Hypothesis first, in
    [`docs/improvement-changelog.md`](docs/improvement-changelog.md), before any code changes. That
    ordering is the reason Iteration 1 could be rejected without argument and Iterations 2 and 3
    could be kept without special pleading — and the reason Iteration 3's stated mechanism could be
    contradicted on the evidence rather than followed off a cliff.
+
+One item is new, and belongs to the product layer rather than the metric:
+
+5. **Give an analysis somewhere to live.** The in-memory store holds sixteen entries and does not
+   survive a restart, which is the deliberate consequence of "no database" and is fine for a local
+   tool. If the dashboard is ever to be more than that, the `AnalysisStore` interface is the seam —
+   `save` / `get` / `list`, already the only thing the routes depend on — and the honest version of
+   this work is a persistence adapter behind it, not a change to the analysis.
+
