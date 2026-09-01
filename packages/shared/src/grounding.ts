@@ -105,6 +105,27 @@ export function createCitationVerifier(
   return (item: Evidence): boolean => verify(item, index).grounded;
 }
 
+/**
+ * The same source lookup grounding uses, exposed on its own.
+ *
+ * A citation's `source` is what the *model* wrote, and grounding accepts three
+ * spellings of the same artefact — the exact id, a case-insensitive match, and a
+ * bare basename. So a later layer that wants to know *which ledger artefact* a
+ * surviving citation refers to — to show its text, or to count citations per
+ * source — cannot simply compare strings: it would fail to link exactly the
+ * citations grounding chose to accept.
+ *
+ * Exported for the same reason as `createCitationVerifier`: one resolver means the
+ * layer that displays evidence and the layer that verifies it cannot disagree about
+ * what a citation points at.
+ */
+export function createSourceResolver(
+  sources: readonly ContextSourceText[],
+): (source: string) => ContextSourceText | undefined {
+  const index = buildSourceIndex(sources);
+  return (source: string): ContextSourceText | undefined => resolveSource(source, index);
+}
+
 interface SourceIndex {
   byId: Map<string, ContextSourceText>;
   byLowerId: Map<string, ContextSourceText>;

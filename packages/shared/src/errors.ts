@@ -37,6 +37,25 @@ export class SchemaError extends RepoArchaeologistError {
 export class EvaluationError extends RepoArchaeologistError {}
 
 /**
+ * A request from outside the process is malformed or names something absent.
+ *
+ * Distinct from `ConfigError`, which is the *operator* having set something up
+ * wrongly, and from `ToolError`, which is a call the *model* made. This is a
+ * caller's mistake: a missing field, an over-long question, an analysis id that
+ * was never issued. It exists so a request handler can answer "your fault, here
+ * is what to change" without inspecting message text to guess the category.
+ */
+export class RequestError extends RepoArchaeologistError {
+  /** Set when the specific failure is "no such thing", so a handler can answer 404. */
+  readonly notFound: boolean;
+
+  constructor(message: string, hint?: string, options?: { notFound?: boolean }) {
+    super(message, hint);
+    this.notFound = options?.notFound ?? false;
+  }
+}
+
+/**
  * A tool call the agent asked for cannot be honoured: unknown tool, invalid
  * arguments, or a path outside the repository.
  *

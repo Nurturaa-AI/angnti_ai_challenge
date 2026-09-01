@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@repo-arch/advanced": "workspace:*",
+    "@repo-arch/app": "workspace:*",
     "@repo-arch/baseline": "workspace:*",
     "@repo-arch/evaluation": "workspace:*",
     "@repo-arch/shared": "workspace:*"

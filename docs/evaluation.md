@@ -299,6 +299,84 @@ like-for-like. A first Iteration 2 advanced run is also not reported: it crashed
 protocol error (parallel function calls replayed in the wrong arrangement) that was a
 pre-existing latent bug in the shared model path, and a crashed run is not a measurement.
 
+### Iteration 3, like-for-like
+
+Same model, seed, thinking level and unmodified cases as the pair above. Run id
+`eval-advanced-2026-08-31T06-18-59Z`.
+
+| | Iteration 2 | Iteration 3 | Δ |
+| --- | --- | --- | --- |
+| **Evidence-backed task accuracy** | **85.7 % (12/14)** | **100.0 % (14/14)** | **+14.3 pts** |
+| Answer accuracy | 100.0 % (14/14) | 100.0 % (14/14) | 0 |
+| Cases fully cited | 0 / 2 | 2 / 2 | +2 |
+| Fabrications / dropped / briefing unsupported claims | 0 / 0 / 0 | 0 / 0 / 0 | 0 |
+| Mean evidence relevance | 0.7321 (n=14) | 0.4105 (n=14) | −0.3216 |
+| Tokens | 56 795 in / 6 400 out | 56 795 in / 6 400 out | **0** |
+| Cost | $0.033038 | $0.033038 | **$0** |
+
+The token counts match per case to the digit, because the precision pass runs *after* synthesis:
+the prompts were byte-identical and the model produced the same output twice. The same model
+output scored 85.7 % with Iteration 2's citations and 100 % with Iteration 3's. On the stronger
+`gemini-3.5-flash` the advanced system ties its own baseline at 78.6 %, with one dropped citation
+and one unsupported claim. Both pairs, per question, are decomposed in
+[`improvement-changelog.md`](improvement-changelog.md) and [`../CHANGELOG.md`](../CHANGELOG.md).
+
+Note what this means for the next iteration: on `gemini-3.5-flash-lite` the primary metric has no
+headroom left. 14/14 cannot improve, so any change measured on this dataset and model scores 100 %
+or worse, and a tie says nothing. Growing the dataset is the blocking item.
+
+### Iteration 4 — the product layer is not on this path
+
+Iteration 4 added a web application, an architecture graph, a question mode and a PDF exporter.
+**It was not measured against a model and it claims no movement in any metric.**
+
+That is structural rather than a shortcut. Everything it added sits *downstream* of the pipeline:
+it reads a `RunRecord` and the evidence ledger the run produced. The only change inside
+`runAdvanced` and `runBaseline` was one optional `onSources` callback, invoked after the ledger is
+final, which cannot add to what a run may cite and which the evaluator does not pass. Measuring
+the same pipeline again to report the same number would be theatre; measuring it and *calling* the
+result an improvement would be worse.
+
+Three properties held while the layer was built, and each is worth naming because a product layer
+is exactly where they would erode:
+
+- **No evaluation case was modified.** Not a question, not an `expectedEvidence` list, not a
+  keyword.
+- **The evaluator is still question-blind.** `runEvaluation` passes only a repository path into
+  `runBaseline`/`runAdvanced`, and the sentinel test that asserts no question text reaches the
+  model's input still passes. The question mode *does* aim the scout at a question — that is what
+  a reader asked at runtime, and the evaluation path never calls it. `--focus` remains unused by
+  the evaluator for the same reason.
+- **Nothing was tuned to a fixture.** No fixture name, expected answer, expected keyword or
+  fixture-derived architecture relationship appears in the product layer's code.
+
+What *was* run, for compatibility rather than for a number — both offline, on the deterministic
+mock provider:
+
+| | Baseline (`--mock`) | Advanced (`--mock`) |
+| --- | --- | --- |
+| Run id | `eval-baseline-2026-09-01T22-56-31Z` | `eval-advanced-2026-09-01T22-56-51Z` |
+| Evidence-backed task accuracy | 21.4 % (3/14) | 28.6 % (4/14) |
+| Answer accuracy | 21.4 % (3/14) | 28.6 % (4/14) |
+| Fabrications / dropped citations | 0 / 0 | 0 / 0 |
+| Failed cases | 0 / 2 | 0 / 2 |
+
+> These are **not** a measurement of any system's quality, and the harness says so in a caveat on
+> the run itself: the mock provider returns canned text assembled from the context it was handed,
+> so these figures measure the harness and the fixture, not a model. They are reported here only
+> to show that both evaluation commands still execute end to end after the product layer landed.
+
+Both pairs of figures reproduced exactly across two independent runs, the second made after the CLI
+was refactored to dispatch through `analyzeRepository`. Since the mock provider is deterministic,
+an identical result is the expected outcome — which is what makes a *differing* one informative: it
+would have shown the refactor changed what a run does, not just how it is started.
+
+No paid run was made for Iteration 4. `DEFAULT_MODEL` is now `gemini-3.7-flash`, which no
+historical run used, so a bare `pnpm evaluate:advanced` would produce a number comparable to
+nothing; a comparable run needs `--model gemini-3.5-flash-lite --case-delay 20` on both systems,
+and it would re-measure a pipeline that did not change. Iteration 3's figures stand as the last
+real measurement, unedited.
+
 <a name="limitations"></a>
 ## Limitations
 

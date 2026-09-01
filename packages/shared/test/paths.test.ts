@@ -76,6 +76,89 @@ describe("redactSecrets", () => {
     const text = "Evidence: package.json names express ^4.19.2 as a runtime dependency.";
     expect(redactSecrets(text)).toBe(text);
   });
+
+  /**
+   * The shape-based half, added when a report stopped being the only thing that leaves the
+   * process: an HTTP response, a metric event and an exported PDF each carry excerpts from
+   * files nobody vetted, and a token committed to a source file has no `API_KEY =` beside it
+   * to give it away.
+   *
+   * Every value below is a published documentation example, not a real credential.
+   */
+  const CREDENTIAL_EXAMPLES: readonly [string, string][] = [
+    ["an AWS access key id", "AKIAIOSFODNN7EXAMPLE"],
+    ["a GitHub personal access token", `ghp_${"a1B2c3D4e5F6g7H8i9J0".repeat(2)}`],
+    ["a fine-grained GitHub token", `github_pat_${"1a2B3c4D5e6F7g8H9i0J".repeat(2)}`],
+    ["a Slack bot token", "xoxb-123456789012-1234567890123-abcdefABCDEF1234"],
+    ["a Stripe secret key", "sk_live_abcdefghijklmnopqrstuvwx"],
+    ["an Anthropic key", "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"],
+    ["a JWT", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk"],
+  ];
+
+  for (const [what, secret] of CREDENTIAL_EXAMPLES) {
+    it(`redacts ${what} found in the middle of repository text`, () => {
+      const redacted = redactSecrets(`  12 | const client = connect("${secret}");`);
+
+      expect(redacted).not.toContain(secret);
+      expect(redacted).toContain("<redacted-credential>");
+      // The surrounding line survives, because the excerpt is what makes evidence readable.
+      expect(redacted).toContain("const client = connect(");
+    });
+  }
+
+  it("redacts a whole private key block rather than picking at its body", () => {
+    const pem = [
+      "-----BEGIN RSA PRIVATE KEY-----",
+      "MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu",
+      "KUpRKfFLfRYC9AIKjbJTWit+CqvjWYzvQwECAwEAAQ==",
+      "-----END RSA PRIVATE KEY-----",
+    ].join("\n");
+
+    const redacted = redactSecrets(`key = """\n${pem}\n"""`);
+
+    expect(redacted).not.toContain("MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu");
+    expect(redacted).not.toContain("BEGIN RSA PRIVATE KEY");
+    expect(redacted).toContain("<redacted-private-key>");
+  });
+
+  it("keeps the placeholder wording trajectories have used since the first iteration", () => {
+    // A Google key is the one shape with its own placeholder, because the wording is pinned
+    // above and by every trajectory already on disk.
+    expect(redactSecrets("AIzaSyA1b2C3d4E5f6G7h8I9j0")).toBe("<redacted-api-key>");
+  });
+
+  /**
+   * The deliberate non-matches. Each of these is a *reference* to a credential or a
+   * high-entropy string that is not one, and redacting them would make evidence less
+   * readable while protecting nothing.
+   */
+  it("leaves a reference to a credential readable", () => {
+    for (const text of [
+      "const jwtSecret = env.JWT_SECRET;",
+      "password: process.env.DB_PASSWORD,",
+      "token = readFileSync('/run/secrets/token', 'utf8')",
+    ]) {
+      expect(redactSecrets(text)).toBe(text);
+    }
+  });
+
+  it("does not mistake a hash, a uuid or a hex digest for a credential", () => {
+    for (const text of [
+      "commit 7ca9e3ad1f4b6c8e9a0b2c3d4e5f60718293a4b5",
+      "id: 3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+      "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    ]) {
+      expect(redactSecrets(text)).toBe(text);
+    }
+  });
+
+  it("cannot recognise a bare high-entropy string, and this documents that limit", () => {
+    // No prefix, no label, nothing to match on. A heuristic wide enough to catch this would
+    // redact hashes, uuids and minified code — see the two tests above. Stated as a test so
+    // the limit is a known property rather than a surprise.
+    const bare = "h8Kq2mVx9pLt4RnZ7wSc";
+    expect(redactSecrets(`const key = "${bare}";`)).toContain(bare);
+  });
 });
 
 describe("writeJsonFile / writeTextFile", () => {

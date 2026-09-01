@@ -711,3 +711,167 @@ the task asked for. It is recorded here because the divergence is more interesti
 $0.281324 and 955.7 seconds across the three scored runs (`flash` baseline, `flash` advanced,
 `flash-lite` advanced). The pass itself costs nothing: no model call, no file read, and token
 counts identical to Iteration 2's on the same model.
+
+---
+
+## Iteration 4 — Interactive Product Layer
+
+### Hypothesis
+
+There is no hypothesis about the metric, and that is the entry's whole point.
+
+The first three iterations each proposed a change to how the system gathers or selects evidence,
+predicted an effect on evidence-backed task accuracy, and were kept or rejected on the measurement.
+This one proposes something different: that the briefing is more useful when a reader can *follow*
+a citation than when they have to open the JSON and grep for the source id. The claim under test is
+about the interface, not the analysis — and the interface is not what the evaluation measures.
+
+So the hypothesis is stated in the falsifiable form actually available here:
+
+> A dashboard, an architecture graph, a grounded question mode and a PDF exporter can all be built
+> **downstream** of the pipeline, such that the pipeline's measured behaviour is bit-for-bit
+> unchanged, and every new surface inherits the existing evidence rules rather than restating them.
+
+That is checkable, and the ways it could fail are concrete. A graph could invent an edge nothing in
+the ledger supports. A question mode could let a model cite a file it never opened, or let its own
+earlier answers become evidence. A PDF could carry a secret out of the process. Any of these would
+be a real regression in the property the project exists to demonstrate, and none of them would show
+up in the benchmark — which is precisely why they are the thing to test.
+
+### Change
+
+Two new workspace packages and one optional callback.
+
+**`packages/app` — the analysis core.** `analyzeRepository` is now the single place that decides
+which system runs; the CLI's `analyze` command and the web server's `POST /api/analyze` both go
+through it. It adds no phase, skips none and reorders nothing — `runBaseline` and `runAdvanced`
+still own the pipeline. On top of the record it derives four things:
+
+- `AnalysisReport` — citations interned as `ev-001`, `ev-002`, … in traversal order, claims
+  referring to them by id, each source labelled with the origin that produced it (reconnaissance,
+  scout, model tool, corroboration). Derived from a record, never in place of one; the existing
+  schemas are untouched.
+- `ArchitectureGraph` — eleven node types and ten relationships, both closed sets validated at
+  construction. Every node and every edge carries the evidence ids it came from, and layout is
+  arithmetic rather than a simulation, so the same report yields the same graph.
+- The question loop — the same scout, the same three read-only tools, the same boundary, the same
+  ledger, the same grounding, bounded at 4 tool calls, 3 turns, 3 scout reads and 6 replayed
+  history turns. An answer whose citations do not survive grounding is replaced by one sentence:
+  *"I couldn't verify this from the repository evidence I inspected."*
+- `PdfReportExporter` behind a `ReportExporter` seam, over a hand-written PDF 1.4 writer: no
+  dependency, no browser, no build step.
+
+**`apps/web` — transport and a UI.** `node:http`, loopback by default, three refusals before any
+route runs (`421` for a non-localhost `Host`, `403` for a foreign `Origin`, `413` for a body over
+1 MiB), `default-src 'none'`, and a `public/` directory of one HTML file, one stylesheet and one
+script. No framework: partly the iteration's own rule to prefer what is already here, partly
+because a CSP with no `unsafe-inline` and no third-party origin is only possible if nothing needs
+them.
+
+**The pipeline's entire footprint** is an optional `onSources` callback on `runAdvanced` and
+`runBaseline`, invoked once after the evidence ledger is final. It cannot add to the ledger and
+nothing reads its return value; a run that passes no callback — which is every run the evaluator
+makes — executes exactly as before. The alternative, re-collecting context to recover the bytes,
+was rejected as *dishonest* rather than slow: a second pass can produce a different ledger, and
+then the evidence panel would be showing text the briefing was never checked against.
+
+Four shared modules were extended additively: a `RequestError` type, a `createSourceResolver` built
+from the same resolver grounding uses, a question branch in the mock provider selected by schema
+shape, and shape-based credential patterns in `redactSecrets`.
+
+### Measurement
+
+**No paid evaluation run was made, and no benchmark movement is claimed.**
+
+The reason is structural rather than a matter of budget. Everything this iteration added sits
+downstream of the pipeline; the only change inside it is an observer the evaluator does not pass.
+Re-running the same code to report the same number would be theatre, and calling the result an
+improvement would be worse. Iteration 3's figures stand as the last real measurement.
+
+There is a second reason a paid pair would have been uninformative even if it had been run:
+`gemini-3.5-flash-lite` is at 14/14, so the primary metric has had no headroom on this dataset
+since Iteration 3 — the blocking item at the top of `CHANGELOG.md`'s `## Next`. And `DEFAULT_MODEL`
+is now `gemini-3.7-flash`, which no historical run used, so a bare `pnpm evaluate:advanced` would
+produce a figure comparable to nothing.
+
+What was run, to show both evaluation commands still execute end to end — offline, on the
+deterministic mock provider:
+
+| | Baseline `--mock` | Advanced `--mock` |
+| --- | --- | --- |
+| Run id | `eval-baseline-2026-09-01T22-56-31Z` | `eval-advanced-2026-09-01T22-56-51Z` |
+| Evidence-backed task accuracy | 21.4 % (3/14) | 28.6 % (4/14) |
+| Answer accuracy | 21.4 % (3/14) | 28.6 % (4/14) |
+| Fabrications | 0 | 0 |
+| Dropped citations | 0 | 0 |
+| Unsupported answers | 0 | 0 |
+| Failed cases | 0 / 2 | 0 / 2 |
+
+> These are **not** a measurement of either system's quality, and the harness prints its own
+> caveat saying so: the mock returns canned text assembled from the context it was handed. A mock
+> figure and a model figure are not comparable in either direction.
+
+Both figures reproduced exactly across two independent runs forty minutes apart, the second after
+the CLI had been refactored to dispatch through `analyzeRepository`. That is the comparison worth
+making here: the refactor changed *how* a run is started, and any difference in these numbers would
+have meant it also changed what the run does.
+
+What *was* measured is the hypothesis as stated — that nothing on the measured path changed:
+
+| Check | Result |
+| --- | --- |
+| Evaluation cases modified | 0 (no question, `expectedEvidence` or keyword touched) |
+| Evaluator still question-blind | Yes — the sentinel test asserting no question text reaches the model still passes |
+| Fixture names, expected answers or fixture-derived relationships in product code | 0 |
+| Files on the measured path altered by the extended `redactSecrets` | **0 of 199** — every file under `fixtures/` (30 working-tree files plus the generated git objects, 146 in total), both evaluation cases, both evaluator sources, and all 13 reports and 36 trajectories already on disk are byte-identical through it |
+| `ADVANCED_RESPONSE_SCHEMA` top-level properties matching the mock's question branch | None — it has neither `answer` nor `citations`, so the briefing path cannot reach the new code |
+| Tests | 397 → **491**, all passing, offline; no existing test deleted or weakened |
+| `pnpm typecheck` | Clean |
+
+The 94 new tests are where the failure modes named in the hypothesis are actually checked: an edge
+whose relationship is not in the closed set is rejected at construction; a question whose evidence
+does not support an answer returns the unsupported sentence rather than a plausible one; a
+follow-up cannot cite a previous answer; an evidence id from another analysis is a `404`; and the
+PDF is asserted to contain the redacted form of a secret-shaped excerpt rather than the secret.
+
+### Result
+
+**Kept, with the claim scoped to what was verified.** The four capabilities work end to end against
+a real repository over a real socket — one integration test drives analyse → dashboard → question →
+evidence → export, and the manual walkthrough produced a 19-node, 9-edge graph, zero console
+errors, and a 7-page, 35 KB PDF. The evidence rules were inherited rather than restated: one path
+boundary reused three times, one ledger, one grounding implementation, one redaction function.
+
+What is **not** claimed: that the analysis got better, that any metric moved, or that the graph and
+the question mode are as well tested as the pipeline they sit on. Fourteen questions and two
+fixtures did not become a larger dataset because a browser was added.
+
+### Decision
+
+**Iteration 4 is kept**, on the grounds that it was measured against the only claim it made. Three
+things are recorded rather than buried.
+
+`ADVANCED_VERSION` and `BASELINE_VERSION` were deliberately **not** bumped, against item 3 of the
+previous `## Next`. Run records stamp the *system* version, and this iteration changed no system
+behaviour; bumping it would assert a difference that does not exist and stamp a new version on
+results measured under the old one. The bump belongs at the start of the next *measured* iteration,
+which is what the item actually asks for. Only the root project version moved, `0.4.0` → `0.5.0`.
+
+The question loop was **not** refactored to share code with the advanced system's tool loop. They
+already share the tools, the boundary, the ledger and the grounding — the parts where a divergence
+would be dangerous. What differs is the loop's own bounds and its prompt, and unifying them would
+mean editing the measured path to serve an unmeasured feature, which §1 forbids for good reason.
+
+And `redactSecrets` was **widened**, which is the one change in this iteration that touches shared
+code used by the pipeline. It was verified not to alter a single byte on the measured path before
+being kept, and 12 unit tests pin both what it now catches and the three categories it deliberately
+does not — a credential *reference* like `env.JWT_SECRET`, a hash or uuid, and a bare high-entropy
+string with no prefix and no label. The last is a real limit, stated as a passing test so it is a
+known property rather than a surprise.
+
+### Cost of the result
+
+$0.00. No paid model call was made in this iteration: the mock evaluation runs, the full test suite
+and the manual UI walkthrough are all offline. The cost was entirely in engineering time, and the
+thing it bought is not a number on the benchmark — it is that a claim in the briefing is now two
+clicks from the bytes that justify it.

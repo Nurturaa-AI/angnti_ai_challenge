@@ -96,6 +96,21 @@ export interface RunAdvancedOptions {
    * which is the configuration every measured number in the changelog comes from.
    */
   focus?: string | undefined;
+  /**
+   * Receives the finished evidence ledger — sources *with their text* — once the run
+   * has stopped gathering evidence.
+   *
+   * The run record carries only source metadata (`meta.contextSources`), which is
+   * enough to audit a run but not enough to serve a citation back to a reader or to
+   * ground a later question against the same evidence. A consumer that needs the bytes
+   * asks for them here rather than replaying the run to re-derive them, which could
+   * silently produce a *different* ledger under a different budget.
+   *
+   * Strictly an observation: it is called after the ledger is final, it cannot add to
+   * it, and nothing downstream of it reads the callback's return value. A run with no
+   * callback behaves identically to one before this option existed.
+   */
+  onSources?: ((sources: readonly ContextSourceText[]) => void) | undefined;
 }
 
 export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecord> {
@@ -330,6 +345,7 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
   //    artefacts the model had but did not cite. Grounding still runs afterwards,
   //    so nothing here can put an unverifiable citation into the briefing.
   const sources = ledger.toArray();
+  options.onSources?.(sources);
   const { body: refinedBody, summary: precision } = applyEvidencePrecision(body, sources, precisionPolicy);
   trajectory.step("refine-evidence", { ...precision });
 

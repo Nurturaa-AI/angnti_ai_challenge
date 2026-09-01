@@ -40,9 +40,12 @@ export function createMockLlmClient(config: AnalysisConfig): LlmClient {
     },
 
     generateWithTools(request: ToolTurnRequest): Promise<ToolTurnResponse> {
-      // A schema on the request means exploration is over and a briefing is due.
+      // A schema on the request means exploration is over and something is due. Which
+      // contract was asked for decides what: a briefing, or an answer to a question.
       if (request.schema) {
-        const body = buildMockBodyFromConversation(request.steps);
+        const body = isQuestionSchema(request.schema)
+          ? buildMockAnswerFromConversation(request.steps)
+          : buildMockBodyFromConversation(request.steps);
         return Promise.resolve({
           text: JSON.stringify(body),
           toolCalls: [],
@@ -222,6 +225,109 @@ function buildMockBodyFromConversation(steps: readonly ConversationStep[]): Anal
     evidence: [...body.evidence, ...cited],
     confidence: 0.4,
   };
+}
+
+/**
+ * True when the requested schema is the question contract rather than the briefing's.
+ *
+ * Detected by shape, not by a flag the caller passes. The mock's whole discipline is
+ * that it sees only what a real model sees, and a real model distinguishes these two
+ * requests by exactly this: one asks for an `answer` with `citations`, the other for a
+ * `summary` with sections.
+ */
+function isQuestionSchema(schema: Record<string, unknown>): boolean {
+  const properties = schema["properties"];
+  if (typeof properties !== "object" || properties === null) return false;
+  return "answer" in properties && "citations" in properties;
+}
+
+/** The question contract, structurally. Declared here so the mock stays dependency-free. */
+interface MockAnswer {
+  answer: string;
+  sufficient: boolean;
+  citations: Evidence[];
+  confidence: number;
+}
+
+/**
+ * Builds an answer from the question transcript.
+ *
+ * Same discipline as the briefing above: every citation is quoted out of a `read_file`
+ * output that is really in the conversation, with the gutter stripped, so it is
+ * verifiable against the ledger rather than merely plausible. What this exercises
+ * offline is the whole grounded-answer path — scout evidence, tool reads, citation
+ * extraction, grounding, and the unsupported fallback — with no API key.
+ *
+ * When nothing but reconnaissance was available it reports `sufficient: false`. That is
+ * the honest answer for a mock that has read a directory listing and been asked how
+ * something works, and it is the case worth being able to reach in a test: the harness
+ * replaces the answer with its fixed unsupported wording.
+ */
+function buildMockAnswerFromConversation(steps: readonly ConversationStep[]): MockAnswer {
+  const firstUser = steps.find((step) => step.kind === "user");
+  const promptText = firstUser?.kind === "user" ? firstUser.text : "";
+  const question = parsePromptSection(promptText, "## The question");
+
+  const citations: Evidence[] = [];
+  const paths: string[] = [];
+
+  const cite = (parsed: ParsedReadFile, how: string): void => {
+    if (paths.includes(parsed.path)) return;
+    paths.push(parsed.path);
+    citations.push({
+      type: "file",
+      source: parsed.path,
+      location: parsed.location,
+      excerpt: parsed.excerpt,
+      supports: `Content of ${parsed.path}, ${how}.`,
+    });
+  };
+
+  for (const block of parseScoutEvidenceBlocks(promptText)) {
+    const parsed = parseReadFileOutput(block.output);
+    if (parsed) cite(parsed, `found by searching for ${block.matched} and read before the first turn`);
+  }
+  for (const step of steps) {
+    if (step.kind !== "toolResult" || step.name !== "read_file" || step.isError) continue;
+    const parsed = parseReadFileOutput(step.output);
+    if (parsed) cite(parsed, "read while answering this question");
+  }
+
+  if (citations.length > 0) {
+    return {
+      answer:
+        `${paths.length} file(s) were read while answering "${question}": ${paths.join(", ")}. ` +
+        "Their contents are quoted in the citations below. This offline provider reports what it " +
+        "was handed and does not reason about it, so treat the citations as the answer and the " +
+        "prose as a description of where they came from.",
+      sufficient: true,
+      citations,
+      confidence: 0.4,
+    };
+  }
+
+  const sources = parseSourceBlocks(promptText);
+  return {
+    answer:
+      `No file was read while answering "${question}". Only the reconnaissance context was ` +
+      `available (${sources.map((source) => source.id).join(", ") || "nothing"}), which shows what ` +
+      "exists and never how it behaves.",
+    sufficient: false,
+    citations: sources.map((source) => ({ type: source.type, source: source.id })),
+    confidence: 0.1,
+  };
+}
+
+/** The first non-empty line under a `## Heading` in a rendered prompt. */
+function parsePromptSection(prompt: string, heading: string): string {
+  const lines = prompt.split("\n");
+  const start = lines.indexOf(heading);
+  if (start === -1) return "";
+  for (const line of lines.slice(start + 1)) {
+    if (line.startsWith("## ")) break;
+    if (line.trim() !== "") return line.trim();
+  }
+  return "";
 }
 
 /** One `### SCOUT EVIDENCE:` block from the reconnaissance prompt. */

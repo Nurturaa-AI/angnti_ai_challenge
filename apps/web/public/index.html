@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Repo Archaeologist</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">repo<span>-arch</span></div>
+
+      <form class="analyse" id="analyse-form" autocomplete="off">
+        <label class="field">
+          <span>Repository</span>
+          <select id="repository" required></select>
+        </label>
+        <label class="field">
+          <span>System</span>
+          <select id="system"></select>
+        </label>
+        <label class="field grow">
+          <span>Scout focus <em>optional</em></span>
+          <input id="focus" type="text" maxlength="500" placeholder="a question to aim the evidence scout at" />
+        </label>
+        <button class="primary" id="analyse-button" type="submit">Analyse</button>
+      </form>
+
+      <div class="provider" id="provider"></div>
+    </header>
+
+    <div class="layout">
+      <nav class="sidebar">
+        <ul class="nav" id="nav"></ul>
+        <div class="recent">
+          <h3>Recent analyses</h3>
+          <ul id="recent"></ul>
+        </div>
+        <p class="sidebar-note">
+          Analyses are held in memory. Restarting the server clears them.
+        </p>
+      </nav>
+
+      <main id="main">
+        <section class="empty" id="placeholder">
+          <h1>Show me where you found it.</h1>
+          <p>
+            Pick a repository and run an analysis. Every claim on the dashboard carries the citations
+            that support it, and every citation opens the artefact it was read from.
+          </p>
+        </section>
+      </main>
+    </div>
+
+    <aside class="drawer" id="drawer" hidden>
+      <header>
+        <div>
+          <span class="drawer-eyebrow" id="drawer-eyebrow">Evidence</span>
+          <h2 id="drawer-title">&nbsp;</h2>
+        </div>
+        <button class="ghost" id="drawer-close" type="button" aria-label="Close">&times;</button>
+      </header>
+      <div class="drawer-body" id="drawer-body"></div>
+    </aside>
+
+    <div class="status" id="status" hidden></div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
