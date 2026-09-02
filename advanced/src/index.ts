@@ -111,7 +111,40 @@ export interface RunAdvancedOptions {
    * callback behaves identically to one before this option existed.
    */
   onSources?: ((sources: readonly ContextSourceText[]) => void) | undefined;
+
+  /**
+   * Receives the name of each phase as the run reaches it.
+   *
+   * The same contract as `onSources`, for the same reason: a product layer that
+   * wants to show progress should not have to guess at it from elapsed time, and
+   * the alternative — inventing a plausible-looking progress bar in the browser —
+   * would be a claim about the run that the run never made.
+   *
+   * It hands over a phase *name* and nothing else. Not the prompt, not the search
+   * terms, not the tool results: those are internal, and a caller that receives
+   * only an enum member cannot leak them. Strictly an observation — no control
+   * flow reads it, its return value is discarded, and a run with no callback
+   * produces a byte-identical record to one with it. A regression test asserts
+   * exactly that.
+   */
+  onPhase?: ((phase: AdvancedPhase) => void) | undefined;
 }
+
+/**
+ * The phases of an advanced run, in the order they occur.
+ *
+ * These are the numbered comments in `runAdvanced` given names. They exist so
+ * `onPhase` has a closed vocabulary rather than a free string, which is what
+ * keeps a phase report from becoming a channel for whatever prose is at hand.
+ */
+export type AdvancedPhase =
+  | "collecting-context"
+  | "scouting"
+  | "exploring"
+  | "synthesizing"
+  | "validating-schema"
+  | "refining-evidence"
+  | "grounding";
 
 export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecord> {
   const now = options.now ?? ((): Date => new Date());
@@ -130,6 +163,7 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
 
   // 1. Reconnaissance: the same shallow context the baseline gets, and the
   //    starting contents of the evidence ledger.
+  options.onPhase?.("collecting-context");
   const context = collectRepositoryContext(options.repositoryPath, options.collectOptions);
   const ledger = new EvidenceLedger(context.sources);
   trajectory.step("collect-context", {
@@ -150,6 +184,7 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
   // 2. The Evidence Scout: deterministic search, ranking and reading, with no model
   //    in the loop. It runs first so that the model is reasoning about evidence
   //    rather than about which filename to guess.
+  options.onPhase?.("scouting");
   const scout = runEvidenceScout(toolContext, {
     focus: options.focus,
     sources: context.sources,
@@ -197,6 +232,7 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
   });
 
   // 3. The exploration loop.
+  options.onPhase?.("exploring");
   const conversation: ConversationStep[] = [{ kind: "user", text: reconPrompt }];
 
   let turns = 0;
@@ -298,6 +334,7 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
   }
 
   // 4. Synthesis: no tools, strict schema, and a closed list of citable ids.
+  options.onPhase?.("synthesizing");
   const citableIds = ledger.toArray().map((source) => source.id);
   const synthesisPrompt = buildSynthesisPrompt({ citableIds, filesRead, budgetExhausted });
   conversation.push({ kind: "user", text: synthesisPrompt });
@@ -331,6 +368,7 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
   }
 
   // 5. Parse and validate.
+  options.onPhase?.("validating-schema");
   const parsed = parseModelJson(finalResponse.text);
   const body = validateWithSchema(AnalysisBodySchema, parsed, "model analysis");
   trajectory.step("validate-schema", {
@@ -344,12 +382,14 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
   //    removes citations another citation already carries and attaches ledger
   //    artefacts the model had but did not cite. Grounding still runs afterwards,
   //    so nothing here can put an unverifiable citation into the briefing.
+  options.onPhase?.("refining-evidence");
   const sources = ledger.toArray();
   options.onSources?.(sources);
   const { body: refinedBody, summary: precision } = applyEvidencePrecision(body, sources, precisionPolicy);
   trajectory.step("refine-evidence", { ...precision });
 
   // 7. Grounding, against the ledger rather than against the initial context.
+  options.onPhase?.("grounding");
   const { body: groundedBody, audit } = groundAnalysis(refinedBody, sources);
   trajectory.step("ground-evidence", {
     ledgerSources: sources.length,

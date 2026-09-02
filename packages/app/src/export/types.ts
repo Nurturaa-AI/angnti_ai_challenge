@@ -1,5 +1,5 @@
 import type { ArchitectureGraph } from "../architecture";
-import type { AnsweredQuestion } from "../questions";
+import type { AnsweredQuestionView } from "../questions";
 import type { AnalysisReport } from "../report";
 
 /**
@@ -18,8 +18,29 @@ import type { AnalysisReport } from "../report";
 export interface ExportInput {
   report: AnalysisReport;
   graph: ArchitectureGraph;
-  /** Questions asked against this analysis, oldest first. */
-  questions: readonly AnsweredQuestion[];
+  /**
+   * Questions asked against this analysis, oldest first.
+   *
+   * The *view*, not the full answer: an `AnsweredQuestion` carries the model's own
+   * trajectory, and a document that gets mailed around is the last place it should
+   * appear. Taking the narrower type means the exporter cannot print it even by
+   * accident — there is no field to reach for.
+   */
+  questions: readonly AnsweredQuestionView[];
+
+  /**
+   * The stored record's identity and timing.
+   *
+   * Distinct from `report.metrics.durationMs`, which times the pipeline. This is the
+   * lifecycle: how long the analysis took from the moment it was queued, which is
+   * the number a reader comparing two exports is actually looking at. Optional so a
+   * caller holding only a report — the CLI — can still export one.
+   */
+  analysisId?: string | undefined;
+  createdAt?: string | undefined;
+  /** Workspace-relative. Never an absolute host path; see `dto.ts`. */
+  repositoryPath?: string | undefined;
+  durationMs?: number | null | undefined;
 }
 
 export interface ReportExporter {

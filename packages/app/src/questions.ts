@@ -97,8 +97,12 @@ export const MAX_HISTORY_TURNS = 6;
  *
  * The same four the report calls reconnaissance. They are bounded by the collector's
  * own caps, which is what makes it safe to render all of them into every question.
+ *
+ * Exported because it is also the rule the durable store projects by: these are the
+ * artefacts a question needs in order to be answerable after a restart, so these are
+ * the artefacts whose text has to survive one.
  */
-const RECONNAISSANCE_TYPES = new Set<EvidenceType>(["tree", "readme", "manifest", "metadata"]);
+export const RECONNAISSANCE_TYPES = new Set<EvidenceType>(["tree", "readme", "manifest", "metadata"]);
 
 /**
  * What the model may return.
@@ -167,6 +171,23 @@ export interface AnsweredQuestion {
   trajectory: TrajectoryStep[];
 }
 
+/**
+ * An answered question as everything outside the answering loop sees it.
+ *
+ * The trajectory is the difference, and dropping it is structural rather than
+ * cosmetic. A trajectory step carries the model's own prose and the raw bytes a
+ * tool returned; both are internal by policy. Making the *type* lack the field
+ * means a route or a store row cannot leak it by forgetting to strip it — there
+ * is nothing to strip.
+ */
+export type AnsweredQuestionView = Omit<AnsweredQuestion, "trajectory">;
+
+/** Drops the trajectory. The only way an answered question leaves this module. */
+export function questionView(answered: AnsweredQuestion): AnsweredQuestionView {
+  const { trajectory: _trajectory, ...view } = answered;
+  return view;
+}
+
 export interface AnswerQuestionOptions {
   question: string;
   /** Stable within the analysis: `q-1`. Prefixes the citation ids. */
@@ -177,7 +198,7 @@ export interface AnswerQuestionOptions {
   /** The analysis ledger. Only its reconnaissance artefacts seed the question. */
   sources: readonly ContextSourceText[];
   /** Earlier answers, oldest first. Replayed as context; never citable. */
-  history?: readonly AnsweredQuestion[] | undefined;
+  history?: readonly Pick<AnsweredQuestion, "question" | "answer">[] | undefined;
   client: LlmClient;
   budget?: ExplorationBudget | undefined;
   now?: (() => Date) | undefined;

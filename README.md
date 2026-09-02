@@ -7,15 +7,18 @@ know what it does, how it is put together, where the sharp edges are, and which 
 read first. Repo Archaeologist produces that briefing — and cites its sources, so you can
 check it instead of trusting it.
 
-> **Status: three measured iterations, one of them rejected. Iteration 4 is the product layer.**
+> **Status: three measured iterations, one of them rejected. Iterations 4 and 5 are the product layer.**
 > Iteration 1 — letting the model search and read files — **scored 7.1 points worse than the
 > baseline** and was rejected. Iteration 2 — making the search deterministic and running it
 > *before* the model gets a turn — **scored 21.4 points better**, 85.7 % against the baseline's
 > 64.3 %. Iteration 3 — a deterministic pass that re-orders and corroborates the citations the
 > model already produced — reached **100 % evidence-backed (14/14) for zero additional tokens**
-> on the same model, seed and cases. Iteration 4 adds no analysis capability: it puts a browser
-> in front of the existing pipeline — dashboard, architecture graph, grounded Q&A, PDF export —
-> and claims no benchmark movement, because nothing on the measured path changed. See
+> on the same model, seed and cases. Iterations 4 and 5 add no analysis capability: they put a
+> browser in front of the existing pipeline — dashboard, architecture graph, grounded Q&A, PDF
+> export, durable analyses, live progress — and claim no benchmark movement. Iteration 5 was the
+> first to touch the measured path at all, by one observation callback, so it *checked* rather than
+> asserted that nothing changed: a byte-identity test in each system, and both offline evaluations
+> re-run and found identical to Iteration 4's question by question. See
 > [`docs/improvement-changelog.md`](docs/improvement-changelog.md) for every number and the
 > diagnosis behind each.
 
@@ -110,13 +113,14 @@ other's.
 exploration-budget flags). `pnpm web -- --help` lists the server's own (`--root`, `--port`,
 `--host`, `--system`) and accepts the same model, budget, scout and precision flags, so a
 repository analysed from the browser runs under the same bounds as one analysed from the
-terminal. The web server writes nothing to disk: an analysis lives in memory and is exported
-on request.
+terminal. The only thing the web server writes is its own analysis database, which lives outside
+the analysed workspace — never inside it, where the analysis could see it and `git clean` could
+delete it.
 
 ## Test
 
 ```sh
-pnpm test         # 491 tests
+pnpm test         # 620 tests
 pnpm typecheck    # tsc --noEmit, strict
 ```
 
@@ -244,8 +248,9 @@ more files it did not ask for, bought no invented quotations at all.
 
 ## The web application
 
-Iteration 4 adds no analysis capability. It puts a browser in front of the pipeline that already
-exists, and makes every claim on screen clickable back to the bytes it came from.
+Iterations 4 and 5 add no analysis capability. They put a browser in front of the pipeline that
+already exists, make every claim on screen clickable back to the bytes it came from, and give the
+result somewhere to live.
 
 ```sh
 pnpm web -- --root ./fixtures --mock     # then open http://127.0.0.1:4173
@@ -255,21 +260,29 @@ pnpm web -- --root ./fixtures --mock     # then open http://127.0.0.1:4173
 browser ──HTTP──► apps/web ──► packages/app ──► advanced/ or baseline/ ──► packages/shared
    UI            routes,        service,          the unchanged             tools, boundary,
                  server,        report,           pipeline                  ledger, grounding
-                 static         graph, Q&A,
-                                store, PDF
+                 static,        graph, Q&A,
+                 SSE            store, PDF
 ```
 
 `apps/web` owns transport and nothing else. `packages/app` is the analysis core both the CLI and
 the server call. Neither reaches past it into the pipeline, and the pipeline was not modified to
-accommodate them: `runAdvanced` gained one optional callback that hands over the finished
-evidence ledger, and nothing else.
+accommodate them: `runAdvanced` and `runBaseline` gained two optional callbacks — one that hands
+over the finished evidence ledger, one that says which phase has been reached — and nothing else.
+Neither is read by any control flow, and a regression test in each system asserts that a run with
+them produces a byte-identical record to a run without.
 
-**Four capabilities.**
+**Five capabilities.**
 
-- **Dashboard.** Pick a repository from the workspace, run the analysis once, then read it in
-  nine sections — overview, architecture, components, data flow, dependencies, testing, evidence,
+- **Dashboard.** Pick a repository from the workspace, run the analysis, then read it in nine
+  sections — overview, architecture, components, data flow, dependencies, testing, evidence,
   questions, export. Every claim carries its citations inline; an uncited claim is labelled
   **unsupported** rather than hidden.
+- **Durable analyses, and live progress.** An analysis is a record before it is a result: closing
+  the tab, navigating away or restarting the server does not lose it, and a failure is a `failed`
+  record you find on reload rather than a request that vanished. A sidebar lists what the workspace
+  holds; while one runs, a phase checklist says which of the eight phases the pipeline has reached.
+  **No percentage and no estimate** — the pipeline reports phases, not progress, and a bar would be
+  the UI claiming something nobody measured.
 - **Architecture graph.** Eleven node types (application, package, module, api, database, queue,
   worker, external-service, cli, configuration, test-suite) and ten relationships (imports,
   calls, depends-on, reads-from, writes-to, publishes, consumes, tests, exposes, configures),
@@ -282,9 +295,22 @@ evidence ledger, and nothing else.
   does not support an answer gets exactly one sentence — *"I couldn't verify this from the
   repository evidence I inspected."* Follow-ups see the earlier turns as context, and **the
   conversation never becomes evidence**: only repository bytes can be cited.
-- **PDF export.** The briefing, the graph, the evidence table and the answered questions as a
-  self-contained document, generated by a hand-written writer with no dependency and no browser.
-  Unsupported claims are labelled in the PDF too.
+- **PDF export.** The briefing, a key-findings page, a drawn architecture figure, the evidence
+  table and the answered questions as a self-contained document, generated by a hand-written writer
+  with no dependency and no browser. Unsupported claims are labelled in the PDF too.
+
+**Where an analysis lives.** A SQLite file, via `node:sqlite` — in Node 22's standard library, so
+durability costs no new dependency. Three properties are worth stating because each was a decision:
+
+- It **refuses to live inside the repository it analyses.** A database there is a file the analysis
+  can see, `git status` reports and `git clean` deletes. Default `~/.repo-archaeologist/analyses.db`;
+  `--db` or `REPO_ARCHAEOLOGIST_DB` overrides it, and `:memory:` opts out of persistence entirely.
+- It stores a **projection, not a dump.** A run record carries model prose, raw tool results and
+  prompts; the store keeps the reconnaissance artefacts a question needs in order to still be
+  answerable after a restart, plus the sources some citation actually resolves to. Less on disk is
+  the feature.
+- Excerpts are **redacted on the way in**, so a restart cannot change what the viewer shows and its
+  line offsets are correct by construction. The ledger the pipeline grounds against stays raw.
 
 **The API**, all JSON, all loopback:
 
@@ -292,12 +318,17 @@ evidence ledger, and nothing else.
 | --- | --- |
 | `GET /api/health` | Provider, model, systems, question limit, export formats |
 | `GET /api/repositories` | The analysable directories inside the workspace |
-| `POST /api/analyze` | Runs the pipeline once, stores the result, returns report + graph |
-| `GET /api/analyses` | What has been analysed this session |
-| `GET /api/analysis/:id` | The stored report, graph and answered questions |
-| `POST /api/questions` | Answers a question against a stored analysis |
-| `GET /api/analysis/:id/evidence/:evidenceId` | One evidence item, its source text, and the excerpt's offsets |
-| `GET /api/analysis/:id/export/pdf` | The PDF |
+| `POST /api/analyses` | Starts an analysis and returns the `queued` record immediately |
+| `GET /api/analyses` | Every analysis the workspace still holds |
+| `GET /api/analyses/:id` | The stored report, graph and answered questions |
+| `DELETE /api/analyses/:id` | Forgets one analysis |
+| `GET /api/analyses/:id/events` | Server-sent progress, replayed from the start of the run |
+| `POST /api/analyses/:id/questions` | Answers a question against a stored analysis |
+| `GET /api/analyses/:id/evidence/:evidenceId` | One evidence item, its source text, and the excerpt's offsets |
+| `GET /api/analyses/:id/export/pdf` | The PDF |
+
+Iteration 4's `POST /api/analyze`, `GET /api/analysis/:id` and body-scoped `POST /api/questions`
+still work; the paths above are the canonical forms.
 
 **Security boundaries**, because the input is a repository nobody vetted:
 
@@ -329,7 +360,7 @@ baseline/              The baseline analyser: prompt, run loop, Markdown renderi
 advanced/              The exploring agent: prompt, scout phase, tool loop, budget
 evaluation/            The evaluation runner, plus cases/ and results/
 packages/shared/       Schemas, context collection, tools, grounding, LLM clients, IO
-packages/app/          The analysis core: service, report, graph, questions, store, PDF
+packages/app/          The analysis core: service, runner, lifecycle, report, graph, Q&A, store, PDF
 packages/evaluator/    Case loading, matching, scoring, aggregation, reporting
 fixtures/              Generated git repositories used by the cases (pnpm setup)
 reports/               Briefings from both systems (JSON + Markdown)
@@ -365,9 +396,10 @@ a precision measure averaged only over questions where it was measurable, so the
 figures have different denominators — and it scores a claim *lower* for citing three verified
 sources where the case named one. Read it alongside the primary metric, not as a substitute.
 
-The product layer has two of its own. An analysis lives in a bounded in-memory store — sixteen
-entries, oldest evicted — so it does not survive a restart. That is the deliberate consequence of
-"no database", and it means the PDF is the only durable artefact the browser produces. And
-`redactSecrets` recognises a credential by its shape or by the name of the variable holding it,
-which cannot catch a bare high-entropy string with neither: a heuristic wide enough to catch that
-would redact hashes, UUIDs and minified code.
+The product layer has three of its own. The store is **single-process**: WAL and a busy timeout
+make a second writer safe rather than fast, and nothing coordinates two servers sharing one file —
+correct for a local tool, wrong for anything shared. **Nothing prunes it**, either: an analysis
+lives until someone deletes it, because a tool that silently discards the analysis you wanted is
+worse than one whose file grows. And `redactSecrets` recognises a credential by its shape or by the
+name of the variable holding it, which cannot catch a bare high-entropy string with neither: a
+heuristic wide enough to catch that would redact hashes, UUIDs and minified code.

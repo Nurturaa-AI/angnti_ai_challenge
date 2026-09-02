@@ -14,33 +14,46 @@
  *   2. A claim is never shown without its evidence. Wherever a claim appears, the chips
  *      beside it open the artefact it was read from — and a claim that lost its citations
  *      is marked, not quietly printed as though it were supported.
+ *   3. The browser derives nothing. The architecture graph, every relationship in it and
+ *      every citation come from the server; this file lays them out, filters them and
+ *      draws them. There is no inference here, and there is no second analysis.
+ *
+ * Everything that decides *what* to show lives in `ui.js`, which is importable by a test.
+ * What is left here is the part that needs a document: element construction, event
+ * wiring, the SVG, the event stream and focus management.
  */
 
-const SECTIONS = [
-  { id: "overview", label: "Overview" },
-  { id: "architecture", label: "Architecture" },
-  { id: "components", label: "Components" },
-  { id: "flows", label: "Data flow" },
-  { id: "dependencies", label: "Dependencies" },
-  { id: "testing", label: "Testing" },
-  { id: "evidence", label: "Evidence" },
-  { id: "questions", label: "Questions" },
-  { id: "export", label: "Export" },
-];
+import {
+  LARGE_GRAPH_NODES,
+  NODE_COLOURS,
+  SECTIONS,
+  UNSUPPORTED_NOTICE,
+  absoluteTime,
+  architectureOutline,
+  countOmittedClaims,
+  defaultGraphView,
+  describeAnalysisRow,
+  duration,
+  edgeDetail,
+  evidenceLineRange,
+  evidenceStrength,
+  filterGraph,
+  fmt,
+  graphSummaryLabel,
+  isRunningStatus,
+  layoutGraph,
+  nodeDetail,
+  nodeMatchesSearch,
+  phaseChecklist,
+  progressLine,
+  questionOutcome,
+  relatedNodeIds,
+  statusDescription,
+  truncate,
+} from "/ui.js";
 
-const NODE_COLOURS = {
-  application: "#58a6ff",
-  package: "#7ee787",
-  module: "#a5d6ff",
-  api: "#ffa657",
-  database: "#d2a8ff",
-  queue: "#f778ba",
-  worker: "#ffdf5d",
-  "external-service": "#8b949e",
-  cli: "#79c0ff",
-  configuration: "#e3b341",
-  "test-suite": "#3fb950",
-};
+/** Below this width the sidebar stacks and the graph opens as an outline. */
+const NARROW_VIEWPORT = "(max-width: 860px)";
 
 const state = {
   health: null,
@@ -51,9 +64,11 @@ const state = {
   /** evidenceId -> payload from /evidence/:id, cached because the text is large. */
   evidence: new Map(),
   graph: {
+    view: "diagram",
     scale: 1,
     x: 0,
     y: 0,
+    /** `{ kind: "node" | "edge", id }`, because both are selectable now. */
     selected: null,
     search: "",
     hiddenTypes: new Set(),
@@ -61,6 +76,20 @@ const state = {
     laidOut: null,
   },
   busy: false,
+  /** The analysis list is a durable resource now, so it has its own load state. */
+  list: { state: "loading", error: null },
+  /** The open `EventSource`, and the id it is following. */
+  stream: null,
+  streamId: null,
+  /** The last progress event for the open analysis, or `null`. */
+  progress: null,
+  /** The id whose delete button has been armed but not confirmed. */
+  confirmDelete: null,
+  /** A question that failed locally: never stored, so it lives only here. */
+  questionError: null,
+  narrow: false,
+  /** What had focus before the drawer opened, so Escape can give it back. */
+  drawerReturn: null,
 };
 
 // ------------------------------------------------------------------ helpers
@@ -110,22 +139,28 @@ function clear(node) {
 
 const $ = (id) => document.getElementById(id);
 
-function status(message, kind) {
+/**
+ * The status bar, and what a screen reader hears.
+ *
+ * Three elements, because a visual toast and an announcement have different
+ * requirements. `#status` is the visible bar and is `aria-hidden`, so it is never read
+ * twice. The two live regions beside it are always in the document and never hidden — a
+ * region revealed in the same tick as its text changes is unreliably announced — and the
+ * kind decides which one gets the text: an error goes to `role="alert"`, which interrupts,
+ * and everything else to `role="status"`, which waits its turn.
+ */
+function toast(message, kind) {
   const bar = $("status");
   bar.textContent = message ?? "";
   bar.className = `status${kind ? ` ${kind}` : ""}`;
   bar.hidden = !message;
-}
 
-function fmt(value) {
-  return typeof value === "number" ? value.toLocaleString("en-US") : String(value ?? "—");
-}
-
-function duration(ms) {
-  if (ms === undefined || ms === null) return "—";
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
-  return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`;
+  const target = kind === "error" ? $("alert") : $("announce");
+  const other = kind === "error" ? $("announce") : $("alert");
+  other.textContent = "";
+  // Same text twice is not re-announced, so clear first when it repeats.
+  if (target.textContent === (message ?? "")) target.textContent = "";
+  target.textContent = message ?? "";
 }
 
 // ---------------------------------------------------------------------- api
@@ -166,6 +201,19 @@ async function boot() {
     }
   });
 
+  // The one place the layout breakpoint is read in JavaScript, and it decides exactly
+  // one thing: which view the architecture section opens in. Everything else about the
+  // narrow layout is CSS, because a stylesheet reflows without a repaint from here.
+  const narrow = window.matchMedia(NARROW_VIEWPORT);
+  state.narrow = narrow.matches;
+  narrow.addEventListener("change", (event) => {
+    state.narrow = event.matches;
+  });
+
+  // A live stream is a socket. Leaving the page should close it rather than leave the
+  // server writing heartbeats into a response nobody will read.
+  window.addEventListener("beforeunload", stopWatching);
+
   try {
     state.health = await api("/api/health");
     $("provider").textContent = `${state.health.provider} · ${state.health.model}`;
@@ -174,7 +222,7 @@ async function boot() {
       systems.append(el("option", { value: system, text: system, selected: system === state.health.defaultSystem }));
     }
   } catch (error) {
-    status(`Cannot reach the server: ${error.message}`, "error");
+    toast(`Cannot reach the server: ${error.message}`, "error");
     return;
   }
 
@@ -196,30 +244,174 @@ async function loadRepositories() {
   }
 }
 
+// -------------------------------------------------------- the analysis list
+
+/**
+ * Reloads the durable analysis list.
+ *
+ * Fetch and render are separate because they fail differently. A list that could not be
+ * fetched is an error the user needs to see and can retry; a list that is empty is a
+ * normal state with its own words. Iteration 4 re-fetched on every `render()`, which was
+ * affordable when the store was a Map in the same process and is not now that it is a
+ * file — and which also meant a half-typed delete confirmation was wiped by an unrelated
+ * repaint.
+ */
 async function loadAnalyses() {
-  const { analyses } = await api("/api/analyses");
-  state.analyses = analyses;
-  const list = $("recent");
-  clear(list);
-  if (analyses.length === 0) {
-    list.append(el("li", { class: "sidebar-note", text: "None yet." }));
-    return;
+  state.list = { state: state.analyses.length === 0 ? "loading" : "ready", error: null };
+  renderAnalysisList();
+  try {
+    const { analyses } = await api("/api/analyses");
+    state.analyses = analyses;
+    state.list = { state: "ready", error: null };
+  } catch (error) {
+    state.list = { state: "error", error: error.message };
   }
-  for (const analysis of analyses) {
+  renderAnalysisList();
+}
+
+function renderAnalysisList() {
+  const list = $("recent");
+  if (!list) return;
+  clear(list);
+
+  if (state.list.state === "error") {
     list.append(
       el(
         "li",
-        {},
-        el("button", {
-          type: "button",
-          class: state.analysis?.id === analysis.id ? "on" : "",
-          onclick: () => void open(analysis.id),
-          text: `${analysis.repositoryName} · ${analysis.system}${analysis.questionCount > 0 ? ` · ${analysis.questionCount}q` : ""}`,
-        }),
+        { class: "sidebar-note" },
+        el("p", { class: "bad", text: `The analysis list could not be loaded: ${state.list.error}` }),
+        el("button", { type: "button", class: "ghost", text: "Try again", onclick: () => void loadAnalyses() }),
+      ),
+    );
+    return;
+  }
+
+  if (state.list.state === "loading" && state.analyses.length === 0) {
+    list.append(el("li", { class: "sidebar-note", text: "Loading saved analyses…" }));
+    return;
+  }
+
+  if (state.analyses.length === 0) {
+    list.append(
+      el("li", { class: "sidebar-note" }, el("p", { text: "No analyses yet." }), el("p", { text: "Run one above. It is saved to this workspace and will still be here after a restart." })),
+    );
+    return;
+  }
+
+  const now = Date.now();
+  for (const summary of state.analyses) {
+    const row = describeAnalysisRow(summary, now);
+    const open = state.analysis?.id === row.id;
+
+    list.append(
+      el(
+        "li",
+        { class: `analysis-row${open ? " on" : ""}` },
+        el(
+          "button",
+          {
+            type: "button",
+            class: "analysis-open",
+            // `aria-current="true"`, not `aria-selected`: these are links to a page
+            // region, not options in a listbox.
+            "aria-current": open ? "true" : false,
+            onclick: () => void openAnalysis(row.id),
+          },
+          el(
+            "span",
+            { class: "analysis-title" },
+            el("span", { class: "analysis-name", text: row.name }),
+            el("span", { class: `pill pill-${row.tone}`, text: row.statusLabel }),
+          ),
+          row.pathIsName ? null : el("span", { class: "analysis-path path", text: row.path }),
+          el("span", { class: `analysis-summary${row.failed ? " bad" : ""}`, text: row.running ? row.progress : row.summary }),
+          el(
+            "span",
+            { class: "analysis-times" },
+            el("span", { title: row.createdAbsolute, text: `created ${row.created}` }),
+            row.updatedSameAsCreated ? null : el("span", { title: row.updatedAbsolute, text: `updated ${row.updated}` }),
+            el("span", { text: row.system }),
+            row.questionCount === 0 ? null : el("span", { text: `${row.questionCount}q` }),
+          ),
+        ),
+        deleteControl(row),
       ),
     );
   }
 }
+
+/**
+ * Delete, in two steps.
+ *
+ * Deleting an analysis destroys its evidence — that is the point of it, and it is why a
+ * single click is the wrong interaction. There is no `confirm()` dialog because the CSP
+ * and the rest of this page keep every control in the document, and because a native
+ * dialog is the one thing a keyboard user cannot navigate back out of. The armed state
+ * lives in `state.confirmDelete`, so exactly one row can be armed at a time.
+ */
+function deleteControl(row) {
+  if (state.confirmDelete !== row.id) {
+    return el("button", {
+      type: "button",
+      class: "analysis-delete ghost",
+      "aria-label": `Delete the analysis of ${row.name}`,
+      text: "Delete",
+      onclick: () => {
+        state.confirmDelete = row.id;
+        renderAnalysisList();
+        // Focus follows the control the user was already on, so a keyboard user is not
+        // dropped back at the top of the list.
+        $("recent")?.querySelector(".analysis-confirm")?.focus();
+      },
+    });
+  }
+
+  return el(
+    "span",
+    { class: "analysis-confirm-group" },
+    el("button", {
+      type: "button",
+      class: "analysis-confirm bad-button",
+      "aria-label": `Confirm deleting the analysis of ${row.name}, and its evidence`,
+      text: "Delete for good",
+      onclick: () => void deleteAnalysis(row.id, row.name),
+    }),
+    el("button", {
+      type: "button",
+      class: "ghost",
+      text: "Cancel",
+      onclick: () => {
+        state.confirmDelete = null;
+        renderAnalysisList();
+      },
+    }),
+  );
+}
+
+async function deleteAnalysis(id, name) {
+  state.confirmDelete = null;
+  try {
+    await api(`/api/analyses/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (state.analysis?.id === id) {
+      // The record is gone, and so is the evidence its ids addressed. Dropping the
+      // cache matters: a stale payload would let the drawer keep showing an excerpt
+      // from an analysis the user just destroyed.
+      stopWatching();
+      state.analysis = null;
+      state.evidence.clear();
+      state.progress = null;
+      closeDrawer();
+    }
+    toast(`Deleted the analysis of ${name}. Its evidence is no longer available.`);
+    setTimeout(() => toast(null), 6000);
+    await loadAnalyses();
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+// ------------------------------------------------------- starting an analysis
 
 async function onAnalyse(event) {
   event.preventDefault();
@@ -228,52 +420,231 @@ async function onAnalyse(event) {
   const system = $("system").value;
   const focus = $("focus").value.trim();
 
-  setBusy(true, `Analysing ${repository} with the ${system} system…`);
+  setBusy(true, `Starting an analysis of ${repository} with the ${system} system…`);
   try {
-    const analysis = await api("/api/analyze", {
+    // 202, and a durable record. The work continues on the server whether or not this
+    // page stays open — which is the whole difference from Iteration 4, where closing
+    // the tab abandoned the analysis mid-pipeline.
+    const analysis = await api("/api/analyses", {
       method: "POST",
       body: { repository, system, ...(focus === "" ? {} : { focus }) },
     });
-    state.analysis = analysis;
-    state.evidence.clear();
-    resetGraphView();
+    adoptAnalysis(analysis);
     state.section = "overview";
     location.hash = "overview";
-    status(
-      `${analysis.report.repository.name}: ${analysis.report.metrics.citationsGrounded} citations grounded, ` +
-        `${analysis.report.metrics.filesInspected} files inspected in ${duration(analysis.report.metrics.durationMs)}.`,
-    );
-    setTimeout(() => status(null), 8000);
+    toast(`Analysis ${analysis.id} queued. Progress appears below as each phase completes.`);
+    watch(analysis.id);
     await loadAnalyses();
     render();
   } catch (error) {
-    status(error.message, "error");
+    toast(error.message, "error");
   } finally {
     setBusy(false);
   }
 }
 
-async function open(id) {
+async function openAnalysis(id) {
   setBusy(true, "Loading analysis…");
   try {
-    state.analysis = await api(`/api/analysis/${encodeURIComponent(id)}`);
-    state.evidence.clear();
-    resetGraphView();
-    await loadAnalyses();
-    status(null);
+    adoptAnalysis(await api(`/api/analyses/${encodeURIComponent(id)}`));
+    toast(null);
+    // A running analysis opened from the list picks its stream up mid-flight: the
+    // server replays the events it has already emitted before going live.
+    if (isRunningStatus(state.analysis.status)) watch(id);
     render();
+    await loadAnalyses();
+    renderAnalysisList();
   } catch (error) {
-    status(error.message, "error");
+    toast(error.message, "error");
   } finally {
     setBusy(false);
   }
+}
+
+/** Makes a fetched detail payload the open analysis, resetting everything derived. */
+function adoptAnalysis(analysis) {
+  stopWatching();
+  state.analysis = analysis;
+  state.evidence.clear();
+  state.questionError = null;
+  state.progress = analysis.phase === null ? null : { status: analysis.status, phase: analysis.phase, message: analysis.phaseMessage };
+  resetGraphView();
+  if (analysis.graph) state.graph.view = defaultGraphView(analysis.graph, state.narrow);
+}
+
+// ---------------------------------------------------------- progressive status
+
+/**
+ * Follows one analysis's event stream.
+ *
+ * `EventSource` and not a WebSocket, and not polling: the traffic is one-directional and
+ * short-lived, the browser reconnects on its own, and the server can replay what a late
+ * subscriber missed. Polling would have been simpler to write and would have made
+ * "which phase is it in" a question answered up to an interval late.
+ *
+ * Each terminal event re-reads the analysis rather than assembling one from the event
+ * payloads. The events say *what happened*; the record is what is true. Building a
+ * report out of stream fragments is how a UI ends up showing something the store does
+ * not contain.
+ */
+function watch(id) {
+  stopWatching();
+  if (typeof EventSource !== "function") return;
+
+  const source = new EventSource(`/api/analyses/${encodeURIComponent(id)}/events`);
+  state.stream = source;
+  state.streamId = id;
+
+  const on = (type, handler) => {
+    source.addEventListener(type, (event) => {
+      let payload;
+      try {
+        payload = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      // A stream that outlived its analysis being closed, or a message for someone
+      // else, is ignored rather than allowed to repaint the open record.
+      if (payload.analysisId !== state.streamId) return;
+      handler(payload);
+    });
+  };
+
+  on("analysis.created", (payload) => {
+    state.progress = { status: payload.status, phase: null, message: "Queued." };
+    renderProgress();
+  });
+
+  on("analysis.started", (payload) => {
+    state.progress = { status: payload.status, phase: null, message: "Checking the repository path." };
+    if (state.analysis?.id === id) state.analysis = { ...state.analysis, status: payload.status };
+    renderProgress();
+    renderAnalysisList();
+  });
+
+  on("analysis.phase", (payload) => {
+    state.progress = { status: "analyzing", phase: payload.phase, message: payload.message };
+    if (state.analysis?.id === id) state.analysis = { ...state.analysis, status: "analyzing", phase: payload.phase, phaseMessage: payload.message };
+    renderProgress();
+    renderAnalysisList();
+  });
+
+  on("analysis.completed", (payload) => {
+    stopWatching();
+    toast(`Analysis finished in ${duration(payload.durationMs)}.`);
+    setTimeout(() => toast(null), 8000);
+    void refreshAfterTerminal(id);
+  });
+
+  on("analysis.failed", (payload) => {
+    stopWatching();
+    // The server's already-sanitised sentence, shown as it arrived. There is nothing
+    // to add to it here, and anything this file appended would be a guess.
+    toast(`Analysis failed: ${payload.error}`, "error");
+    void refreshAfterTerminal(id);
+  });
+
+  source.addEventListener("error", () => {
+    // `EventSource` retries by itself while the connection is merely interrupted; it
+    // only reaches `CLOSED` when it has given up. Saying so beats a progress panel
+    // that silently stops moving.
+    if (source.readyState === EventSource.CLOSED && state.streamId === id) {
+      state.stream = null;
+      state.streamId = null;
+      state.progress = state.progress === null ? null : { ...state.progress, disconnected: true };
+      renderProgress();
+    }
+  });
+}
+
+function stopWatching() {
+  if (state.stream) state.stream.close();
+  state.stream = null;
+  state.streamId = null;
+}
+
+/** Re-reads the record, the list and the page once an analysis reaches a terminal state. */
+async function refreshAfterTerminal(id) {
+  try {
+    if (state.analysis?.id === id) {
+      state.analysis = await api(`/api/analyses/${encodeURIComponent(id)}`);
+      state.progress = null;
+      resetGraphView();
+      if (state.analysis.graph) state.graph.view = defaultGraphView(state.analysis.graph, state.narrow);
+    }
+    await loadAnalyses();
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/**
+ * The progress panel for a running analysis.
+ *
+ * Patched in place rather than through `render()`, because a phase arrives every few
+ * seconds and rebuilding the page under the user each time would move the scroll
+ * position and drop focus. It is a live region, so a screen reader hears each phase
+ * without having to go looking for it.
+ */
+function renderProgress() {
+  const host = $("progress");
+  if (!host) {
+    render();
+    return;
+  }
+  clear(host);
+  const progress = state.progress;
+  if (progress === null) {
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+
+  const described = statusDescription(progress.status);
+  host.append(
+    el(
+      "div",
+      { class: "panel progress" },
+      el(
+        "h2",
+        {},
+        el("span", { class: `pill pill-${described.tone}`, text: described.label }),
+        " ",
+        el("span", { text: "Analysis in progress" }),
+      ),
+      el("p", { class: "prose", text: progressLine(progress.status, progress.phase, progress.message) }),
+      el(
+        "ol",
+        { class: "phase-list" },
+        phaseChecklist(progress.phase).map((step) =>
+          el("li", {
+            class: step.done ? "done" : step.active ? "active" : "",
+            "aria-current": step.active ? "step" : false,
+            text: step.label,
+          }),
+        ),
+      ),
+      progress.disconnected
+        ? el("p", {
+            class: "note",
+            text:
+              "The progress stream disconnected. The analysis is still running on the server — reopen it from the " +
+              "list to pick the stream back up.",
+          })
+        : el("p", {
+            class: "hint",
+            text: "This analysis is saved already. You can close this page and open it again from the list.",
+          }),
+    ),
+  );
 }
 
 function setBusy(busy, message) {
   state.busy = busy;
   $("analyse-button").disabled = busy;
   $("analyse-button").textContent = busy ? "Working…" : "Analyse";
-  if (busy) status(message, "busy");
+  if (busy) toast(message, "busy");
 }
 
 // ------------------------------------------------------------------- render
@@ -1246,10 +1617,10 @@ async function ask(textarea) {
     // Re-read the analysis so the ledger, the citation list and the questions all move
     // together. Patching the local copy would let the three drift apart.
     state.analysis = await api(`/api/analysis/${encodeURIComponent(state.analysis.id)}`);
-    status(null);
+    toast(null);
     render();
   } catch (error) {
-    status(error.message, "error");
+    toast(error.message, "error");
   } finally {
     setBusy(false);
   }

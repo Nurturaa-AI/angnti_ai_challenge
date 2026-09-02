@@ -1,6 +1,8 @@
 import path from "node:path";
 import { ADVANCED_SYSTEM_NAME, runAdvanced } from "@repo-arch/advanced";
 import { BASELINE_SYSTEM_NAME, runBaseline } from "@repo-arch/baseline";
+import type { AdvancedPhase } from "@repo-arch/advanced";
+import type { BaselinePhase } from "@repo-arch/baseline";
 import {
   ConfigError,
   type AnalysisConfig,
@@ -32,6 +34,25 @@ export const ANALYSIS_SYSTEMS: readonly string[] = [ADVANCED_SYSTEM_NAME, BASELI
 
 /** What a caller gets when it does not choose. */
 export const DEFAULT_ANALYSIS_SYSTEM: string = ADVANCED_SYSTEM_NAME;
+
+/**
+ * The name of a system, narrowed.
+ *
+ * `ANALYSIS_SYSTEMS` stays `readonly string[]` because callers validate untrusted
+ * input against it; this is the type a *validated* system name has, which is what
+ * the store persists and the DTOs report.
+ */
+export type AnalysisSystem = typeof ADVANCED_SYSTEM_NAME | typeof BASELINE_SYSTEM_NAME;
+
+/**
+ * A phase either system can report.
+ *
+ * The union of the two pipelines' own vocabularies, which is a superset of each:
+ * the baseline never emits `scouting`, and a consumer must not assume every phase
+ * occurs in every run. `building-report` is not here — it belongs to the product
+ * layer, which reports it after the pipeline has returned.
+ */
+export type AnalysisRunPhase = AdvancedPhase | BaselinePhase;
 
 /**
  * True when the system runs the evidence scout, and can therefore be aimed.
@@ -68,6 +89,14 @@ export interface AnalyzeRepositoryOptions {
    * had been honoured.
    */
   focus?: string | undefined;
+  /**
+   * Observes the pipeline's phases as they happen.
+   *
+   * Forwarded unchanged to whichever system runs; see `RunAdvancedOptions.onPhase`
+   * for the contract. This service adds no phase of its own, because it performs
+   * no phase of its own.
+   */
+  onPhase?: ((phase: AnalysisRunPhase) => void) | undefined;
 }
 
 export interface AnalysisRun {
@@ -120,6 +149,7 @@ export async function analyzeRepository(options: AnalyzeRepositoryOptions): Prom
     collectOptions: options.collectOptions,
     now: options.now,
     onSources: captureSources,
+    onPhase: options.onPhase,
   };
 
   const record =

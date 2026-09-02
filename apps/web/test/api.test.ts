@@ -8,12 +8,15 @@ import {
   type AnalysisConfig,
   type ExplorationBudget,
 } from "@repo-arch/shared";
-import type {
-  AnalysisReport,
-  AnsweredQuestion,
-  ArchitectureGraph,
-  MetricEvent,
-  ReportEvidence,
+import {
+  MEMORY_DATABASE,
+  SqliteAnalysisStore,
+  type AnalysisReport,
+  type AnalysisStore,
+  type AnsweredQuestion,
+  type ArchitectureGraph,
+  type MetricEvent,
+  type ReportEvidence,
 } from "@repo-arch/app";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { serializeJson, type ApiRequest, type ApiResponse } from "../src/api";
@@ -34,6 +37,12 @@ import { createApi, type WebApi } from "../src/routes";
  *
  * The routes are called as functions rather than over a socket. `integration.test.ts`
  * covers the transport; this covers the decisions.
+ *
+ * Iteration 5 note: this file is Iteration 4's suite, and the only edits are the ones the
+ * durable store forces — a store passed to `createApi`, `await` on the store's now
+ * promise-returning methods, `record.evidence` where the field used to be `sources`, and
+ * the two assertions that had pinned the old id scheme. Every property being asserted is
+ * the same property, which is the point of keeping the file rather than rewriting it.
  */
 
 const SECRET = "AKIAIOSFODNN7EXAMPLE";
@@ -44,6 +53,8 @@ let workspace: string;
 let outside: string;
 let api: WebApi;
 let analysis: AnalysisView;
+/** Every store opened here, so none is left holding a connection at teardown. */
+const stores: AnalysisStore[] = [];
 
 interface AnalysisView {
   id: string;
@@ -103,13 +114,24 @@ function writeRepository(root: string): void {
   write(root, "test/router.test.ts", "import { route } from '../src/router';\ntest('routes', () => {});\n");
 }
 
+/**
+ * A fresh API over a fresh in-memory database.
+ *
+ * One store per API, and `:memory:` rather than a temporary file, because a
+ * `node:sqlite` in-memory database belongs to its own connection: two stores built
+ * here cannot see each other's rows even by accident, which is what several of the
+ * isolation assertions below depend on.
+ */
 function newApi(budget: ExplorationBudget = DEFAULT_EXPLORATION_BUDGET): WebApi {
+  const store = new SqliteAnalysisStore({ location: MEMORY_DATABASE, now: fixedClock() });
+  stores.push(store);
   return createApi({
     workspaceRoot: workspace,
     config,
     budget,
     precisionPolicy: DEFAULT_PRECISION_POLICY,
     client: createLlmClient(config),
+    store,
     now: fixedClock(),
   });
 }
@@ -166,13 +188,17 @@ beforeAll(async () => {
   analysis = ok<AnalysisView>(await call(api, "POST", "/api/analyze", { repository: "widget" }), 201);
 });
 
-afterAll(() => {
+afterAll(async () => {
+  for (const store of stores) await store.close();
   if (workspace) rmSync(path.dirname(workspace), { recursive: true, force: true });
 });
 
 describe("POST /api/analyze", () => {
   it("analyses a repository in the workspace and returns a report with its graph", () => {
-    expect(analysis.id).toContain("advanced");
+    // Iteration 5 mints the record id before the pipeline runs — an analysis has to be
+    // addressable while it is still `queued` — so the id no longer carries the system
+    // name. The system is asserted where it is now recorded, which is the report.
+    expect(analysis.id).toMatch(/^an-[a-z0-9]+-\d+$/);
     expect(analysis.report.repository.name).toBe("widget");
     expect(analysis.report.system).toBe("advanced");
     expect(analysis.report.provider).toBe("mock");
@@ -203,11 +229,15 @@ describe("POST /api/analyze", () => {
     }
   });
 
-  it("stores the analysis so it is analysed once and read back many times", () => {
-    const stored = api.store.get(analysis.id);
+  it("stores the analysis so it is analysed once and read back many times", async () => {
+    const stored = await api.store.get(analysis.id);
     expect(stored).toBeDefined();
-    expect(stored?.report.id).toBe(analysis.id);
-    expect(api.store.list().map((entry) => entry.id)).toContain(analysis.id);
+    // The record id and the pipeline's own run id are separate identities now: the
+    // record was created before the run existed. Both must survive the round trip.
+    expect(stored?.id).toBe(analysis.id);
+    expect(stored?.report?.id).toBe(analysis.report.id);
+    expect(stored?.status).toBe("completed");
+    expect((await api.store.list()).map((entry) => entry.id)).toContain(analysis.id);
   });
 
   it("rejects a repository that is not in the workspace", async () => {
@@ -274,7 +304,9 @@ describe("GET /api/analysis/:id", () => {
   it("reports a missing analysis as missing, and says why it might be gone", async () => {
     const error = failure(await call(api, "GET", "/api/analysis/advanced-widget-never-ran"), 404);
     expect(error.name).toBe("RequestError");
-    expect(error.hint).toMatch(/held in memory/);
+    // Iteration 4 said the analysis was "held in memory", which a durable store makes
+    // untrue. The hint now points at the list, which is the thing that can answer it.
+    expect(error.hint).toMatch(/may have been deleted/);
   });
 
   it("has no route for an unknown path", async () => {
@@ -339,9 +371,8 @@ describe("GET /api/analysis/:id/evidence/:evidenceId", () => {
     const bounded = newApi({ ...DEFAULT_EXPLORATION_BUDGET, maxFileBytes: 90, maxFileLines: 2 });
     const run = ok<AnalysisView>(await call(bounded, "POST", "/api/analyze", { repository: "widget" }), 201);
 
-    const truncated = bounded.store
-      .get(run.id)
-      ?.sources.filter((source) => source.truncated)
+    const truncated = (await bounded.store.get(run.id))?.evidence
+      .filter((source) => source.truncated)
       .map((source) => source.id);
     expect(truncated?.length).toBeGreaterThan(0);
 
@@ -359,7 +390,7 @@ describe("GET /api/analysis/:id/evidence/:evidenceId", () => {
     expect(view.source?.reportedLocation).toBe(cited?.location ?? null);
   });
 
-  it("redacts a credential on the way out, while the ledger keeps the bytes grounding verified", async () => {
+  it("redacts a credential on the way out, and never persists it in the first place", async () => {
     const cited = analysis.report.evidence.find((item) => item.excerpt?.includes(SECRET));
     // The mock quoted the README line the key is on, so this is the real case: a
     // grounded citation whose excerpt is a credential.
@@ -370,8 +401,15 @@ describe("GET /api/analysis/:id/evidence/:evidenceId", () => {
     expect(serialised).not.toContain(SECRET);
     expect(serialised).toContain("<redacted-credential>");
     // Redaction is a property of the boundary, not of the ledger: grounding has to
-    // compare an excerpt against what the file really says.
-    expect(api.store.get(analysis.id)?.sources.find((source) => source.id === "README.md")?.text).toContain(SECRET);
+    // compare an excerpt against what the file really says. The *store* is a boundary
+    // too, so what it holds is already redacted — which is what makes an evidence
+    // viewer safe to serve from a database rather than from a live re-read.
+    expect(
+      (await api.store.get(analysis.id))?.evidence.find((source) => source.id === "README.md")?.text,
+    ).not.toContain(SECRET);
+    expect(
+      (await api.store.get(analysis.id))?.evidence.find((source) => source.id === "README.md")?.text,
+    ).toContain("<redacted-credential>");
   });
 
   it("returns nothing for an evidence id this analysis never issued", async () => {
@@ -458,7 +496,7 @@ describe("POST /api/questions", () => {
 
     const ids = [first, second].map((response) => ok<{ question: AnsweredQuestion }>(response, 201).question.id);
     expect(ids.sort()).toEqual(["q-1", "q-2"]);
-    expect(target.store.get(created.id)?.questions).toHaveLength(2);
+    expect((await target.store.get(created.id))?.questions).toHaveLength(2);
   });
 
   it("refuses a question against an analysis that does not exist, and one that is out of bounds", async () => {

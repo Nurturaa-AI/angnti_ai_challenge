@@ -7,6 +7,193 @@ All notable changes to Repo Archaeologist. Format loosely follows
 
 Nothing yet. See [`## Next`](#next) for what the following iteration has to address.
 
+## [0.6.0] — 2026-09-02
+
+Iteration 5: **somewhere for an analysis to live.** A durable store behind the `AnalysisStore` seam
+Iteration 4 declared, a runner that creates the record before the work begins, and live phase
+reporting. **No benchmark improvement is claimed.** What *was* measured is that the pipeline is
+unchanged — asserted as a byte-identity regression test in each system, and confirmed by re-running
+both offline evaluations and diffing them against Iteration 4's, which came back identical question
+by question. See [Measurement](#iteration-5-measurement).
+
+### Added — `packages/app/src/store/`, persistence behind the existing seam
+
+Iteration 4 declared `AnalysisStore` and put a bounded map behind it. This fills it in with
+`node:sqlite` — Node 22's standard library, so a durable store costs **zero new dependencies**. WAL,
+`busy_timeout=5000`, `BEGIN IMMEDIATE` on the read-modify-write paths, four tables, two indexes.
+
+- `store/types.ts` — the seam, widened to what a durable store needs: `create` / `get` / `list` /
+  `update` / `delete` / `appendQuestion` / `getEvidenceSource` / `close`. Five statuses
+  (`queued`, `validating`, `analyzing`, `completed`, `failed`) and eight phases, both closed sets.
+  `MAX_STORED_QUESTIONS = 50` per analysis, oldest evicted.
+- `store/sqlite.ts` — `SqliteAnalysisStore`. `SCHEMA_VERSION = 1`; a file written by a *newer*
+  build is **refused** rather than misread, because half-understanding a schema is worse than
+  declining it. A corrupt JSON column reads as `null` with a `process.emitWarning` instead of
+  losing the whole record. An unrecognised status reads as `failed`, never as `completed`.
+- `store/location.ts` — `resolveDatabaseLocation`. It **refuses a path inside the analysed
+  workspace**: a database there is a file the analysis can see, `git status` reports and `git clean`
+  deletes. Precedence is explicit `--db` > `REPO_ARCHAEOLOGIST_DB` >
+  `~/.repo-archaeologist/analyses.db`. `:memory:` is accepted for a session that should not persist.
+- `store/projection.ts` — what the store is *allowed* to remember. A `RunRecord` carries model
+  prose, raw tool results, prompts and an absolute root; `projectEvidence` keeps the reconnaissance
+  artefacts a question needs to be answerable after a restart, plus the sources some citation
+  actually resolves to, and drops everything else. Excerpts are **redacted on the way in**, so a
+  restart cannot change what the viewer shows and its line offsets are correct by construction —
+  the ledger the pipeline grounds against is untouched and stays raw. Paths are stored
+  workspace-relative; evidence is keyed by `(analysisId, sourceId)`, which is what makes an id from
+  another analysis a 404 rather than a leak.
+
+### Added — `packages/app/src/runner.ts`, a record before the work
+
+`AnalysisRunner.start` writes the `queued` row and returns it, then runs the pipeline detached.
+`run` **never rejects**: by the time the pipeline finishes, the client that asked may be gone and
+there is nobody to catch. A failure is a `failed` *record* the user finds on reload, naming the
+repository as the caller named it rather than as this machine's filesystem does.
+
+### Added — `packages/app/src/lifecycle.ts`, progress without inventing any
+
+A status is a promise about what the record contains; a phase is an observation about where the
+pipeline got to. The two are kept separate on purpose.
+
+- An explicit transition table. A terminal status has no successor, so a finished analysis cannot
+  be reopened and its status stays a promise rather than a guess.
+- `AnalysisEventBus` — five event kinds, per-analysis replay so a browser that POSTs and *then*
+  opens the stream does not miss the first two events, bounded at 64 events × 64 analyses, and a
+  subscriber that throws (a dead socket) cannot take the analysis down with it.
+- `PHASE_MESSAGES` — one line of prose per phase. **No percentage, no interpolation, no estimate:**
+  the pipeline reports phases, not progress, and a bar would be the UI claiming something nobody
+  measured.
+- `safeFailureMessage` / `logFailureMessage` — a deliberate pair. The error's *category* decides
+  whether its text reaches a browser: our own errors were written to be read, an unanticipated
+  exception is replaced wholesale rather than filtered, and a `hint` — written for an operator —
+  never leaves the process.
+
+### Added — `apps/web/src/dto.ts`, every response constructed field by field
+
+No internal object is handed to a serialiser. That sounds like ceremony until you notice what it
+catches: `AnsweredQuestion` carries a trajectory of model prose and raw tool bytes, and
+`AnalysisRun` carries an absolute `repositoryRoot` — both were one `JSON.stringify` from a browser
+in Iteration 4. Listing the fields means adding a field to a domain type cannot silently publish it.
+
+Reinforced in the type system rather than only in the DTO: `AnsweredQuestionView` =
+`Omit<AnsweredQuestion, "trajectory">` is now the only way an answered question leaves
+`questions.ts`, and the PDF exporter takes that narrower type — so it cannot print a trajectory
+even by accident, because there is no field to reach for.
+
+### Added — the analysis list, deletion, and an event stream
+
+`GET /api/analyses`, `DELETE /api/analyses/:id`, and `GET /api/analyses/:id/events` (SSE). The
+question and evidence routes gained path-scoped forms (`/api/analyses/:id/questions`) alongside the
+Iteration 4 bodies, which still work. An id is pattern-checked before the store sees it, so
+malformed input is a 400 with a stable message rather than a query that happens to return nothing.
+
+Streaming is framed at one choke point in `server.ts` rather than in each route, so a route added
+later cannot emit an unframed line, and a browser that navigates away runs the route's teardown
+exactly once — a subscription cannot outlive its socket. `WebApi.idle()` waits for analyses that
+outlived their request, which both the tests and a graceful shutdown need.
+
+### Added — `apps/web/public/ui.js`, the dashboard's pure logic
+
+Split out of `app.js` for one reason: the repository has no bundler and no jsdom, so anything that
+touches `document` can only ever be read by a human, while anything that merely decides *what* to
+show can be imported and asserted. `ui.d.ts` beside it is a hand-written declaration, which is what
+lets a typechecked test call into a browser module in a project with no `allowJs` and no build step.
+
+The UI gained a sidebar of durable analyses with relative times, a phase checklist, live progress
+over SSE with reconnection, deletion with confirmation, and toasts. The PDF gained a Key Findings
+page, a drawn architecture figure (with stated degradation above 30 nodes rather than an illegible
+one), the questions asked, and an evidence reference section.
+
+### Added — tests
+
+129 new tests, 491 → **620**, all passing, offline. **No existing test was deleted or weakened.**
+
+- `packages/app/test/store.test.ts` (39) — the list row's exact key set, proving no payload column
+  reaches a list; cross-analysis evidence isolation; the same evidence id in two analyses as
+  independent rows; per-analysis question eviction; a schema version from the future refused; a
+  corrupt `report` column surviving as `null`; a `StorageError`'s path in its `hint` and not its
+  `message`; and a `work-db` sibling directory proving the workspace check compares on the
+  separator rather than on a prefix.
+- `packages/app/test/lifecycle.test.ts` (21) — replay parity between a late and an early
+  subscriber, both buffer bounds, a throwing subscriber tolerated, `PHASE_MESSAGES` exhaustive
+  against `ANALYSIS_PHASES`, and `safeFailureMessage` asserted directly against a path, a
+  credential and a hint.
+- `packages/app/test/runner.test.ts` (14) — a full offline run against a real temporary repository:
+  a durable record before the work completes, the workspace path absent from the *whole* record,
+  ids that survive a simulated restart, a phase reaching the database mid-run and cleared on
+  completion, and a store whose `update` always throws still producing a `failed` result.
+- `apps/web/test/ui.test.ts` (50) — the pure UI logic, including the three checks that license its
+  duplicated constants: the browser's phase list against `ANALYSIS_PHASES`, its status vocabulary
+  against `ANALYSIS_STATUSES`, and its node palette against `NODE_TYPES`.
+- `advanced/test/advanced.test.ts` (+3), `baseline/test/baseline.test.ts` (+2) — the phase order,
+  and the byte-identity assertion both `onPhase` doc comments already claimed existed.
+
+### Changed — the measured path, and nothing else in it
+
+- `runAdvanced` / `runBaseline` accept an optional `onPhase` callback, with an exported
+  `AdvancedPhase` (7) and `BaselinePhase` (4) vocabulary. **This is the entire footprint.** No
+  control flow reads it, its return value is discarded, the evaluator passes none, and a regression
+  test in each system asserts a run with it produces a byte-identical record to a run without it.
+  The baseline's four names are not a subset by accident: it never scouts, never explores and never
+  refines evidence, and its type says so rather than reporting phases it does not perform.
+- `packages/shared/src/errors.ts` — a new `StorageError`, so "the database could not be opened" is
+  distinguishable from a caller's mistake without reading message text.
+- `packages/app/src/service.ts` — `AnalysisSystem` and `AnalysisRunPhase` types, and `onPhase`
+  forwarded unchanged. The service adds no phase of its own because it performs none.
+- `packages/app/src/questions.ts` — `RECONNAISSANCE_TYPES` exported, because it is also the rule the
+  store projects by; question history narrowed to `Pick<…, "question" | "answer">`, so the replay
+  path cannot see a trajectory either.
+- `apps/web/src/main.ts` — `--db`, and a store opened *before* the server. A database that cannot be
+  opened stops startup rather than the first request, and a failed start closes it rather than
+  leaving a WAL behind.
+- `packages/app/src/store.ts` was **removed**; `store/` replaces it. The in-memory implementation it
+  held is superseded by `:memory:`, which exercises the same code path as a file.
+- The `node:sqlite` experimental warning is **not** suppressed. It prints once on startup, because a
+  suppressed warning is a promise the project cannot keep.
+
+<a name="iteration-5-measurement"></a>
+### Measurement
+
+**No paid evaluation run was made, and no benchmark movement is claimed.** The reasons are
+Iteration 4's, unchanged: nothing on the measured path behaves differently, and
+`gemini-3.5-flash-lite` has been at 14/14 since Iteration 3, so the dataset has no headroom to show
+a movement even if one existed. Iteration 3's figures remain the last real measurement.
+
+This iteration *did* touch the measured path, for the first time since Iteration 3 — so the check is
+a byte-identity test rather than a percentage. A hook that changed the record would have moved both
+systems together, and the comparison between them would have looked untroubled.
+
+| | Baseline `--mock` | Advanced `--mock` |
+| --- | --- | --- |
+| Run id | `eval-baseline-2026-09-02T01-28-27Z` | `eval-advanced-2026-09-02T01-29-00Z` |
+| Evidence-backed task accuracy | 21.4 % (3/14) | 28.6 % (4/14) |
+| Per case | 2/7 and 1/7 | 2/7 and 2/7 |
+| Fabrications / dropped citations / unsupported answers | 0 / 0 / 0 | 0 / 0 / 0 |
+| Failed cases | 0 / 2 | 0 / 2 |
+| Normalized JSON diff vs Iteration 4's runs | **identical** | **identical** |
+
+Mock figures are **not** a measurement of quality, and the harness prints its own caveat saying so.
+The last row is what this table is for, and it is stronger than the headline percentages agreeing:
+with run ids, timestamps and durations normalized out, every question, every score, every citation
+and every dropped-citation record is the same object it was before this iteration existed.
+
+Also checked: **0** files changed under `evaluation/`, `fixtures/`, `packages/evaluator/`,
+`reports/` or `trajectories/`; no evaluation case modified; `pnpm typecheck` clean.
+
+Recorded rather than tidied away: **the hypothesis for this iteration was written after the code**,
+which breaks the ordering the first four iterations honoured. It was written before any
+*measurement* — the byte-identity tests and the evaluation re-run could both have failed, and either
+would have rejected the iteration — but the discipline of having to predict was lost. The full
+account is in [`docs/improvement-changelog.md`](docs/improvement-changelog.md).
+
+### Versioning
+
+Root `0.5.0` → `0.6.0`. Per-package versions stay at `0.1.0`, and `ADVANCED_VERSION` /
+`BASELINE_VERSION` stay at `0.1.0` — this time on evidence rather than judgement. `systemVersion`
+names *behaviour*, and byte-identity is a proof that the behaviour is the same; bumping would assert
+a difference that does not exist and make results that are still valid look stale. See item 3 of
+[`## Next`](#next), which is now scoped to what it actually needs.
+
 ## [0.5.0] — 2026-09-01
 
 Iteration 4: the Interactive Product Layer. A web application, an architecture graph, a grounded
@@ -679,46 +866,59 @@ nothing in this release claims the results are good.
 
 ## Next
 
-Iteration 4 closed none of these, and did not try to: it was a productization iteration, measured
-against the claim that it left the pipeline alone rather than against the benchmark. The list below
-is unchanged in substance from Iteration 3's, because nothing in Iteration 4 addressed it.
+Iteration 5 closed item 5 and sharpened item 3. Items 1, 2 and 4 are carried forward unchanged in
+substance, because nothing in Iteration 5 addressed them — it was a durability iteration, measured
+against the claim that it left the pipeline alone.
 
-1. **Grow the dataset. This is now blocking.** `gemini-3.5-flash-lite` is at 14/14, so the primary
-   metric has no headroom left on this dataset and the next iteration cannot be measured on it at
-   all — any change would score 100 % or worse, and a tie tells you nothing. `gemini-3.5-flash` sits
-   at 11/14 and is a harder test, but its three remaining failures are all `citedEvidence = 0`,
-   which is a synthesis problem rather than a citation one. A third fixture in a language neither
-   current one uses would also test whether the scout's term extraction generalises past JavaScript
-   and Python vocabulary. Nothing else on this list is worth doing first. Iteration 4 raised the
-   stakes on it slightly: the default model is now `gemini-3.7-flash`, so the next measured run
+1. **Grow the dataset. This is blocking, and has been for two iterations.**
+   `gemini-3.5-flash-lite` is at 14/14, so the primary metric has no headroom left on this dataset
+   and the next iteration cannot be measured on it at all — any change would score 100 % or worse,
+   and a tie tells you nothing. `gemini-3.5-flash` sits at 11/14 and is a harder test, but its three
+   remaining failures are all `citedEvidence = 0`, which is a synthesis problem rather than a
+   citation one. A third fixture in a language neither current one uses would also test whether the
+   scout's term extraction generalises past JavaScript and Python vocabulary. **Nothing else on this
+   list is worth doing first.** The default model is now `gemini-3.7-flash`, so the next measured run
    needs an explicit `--model` on both systems to compare with anything recorded above.
 2. **Decide what mean evidence relevance is for, and then fix corroboration to respect it.** It has
-   now moved the wrong way twice while the primary metric moved the right way, and this time by a
-   third of its value: the pass adds two corroborations per claim unconditionally up to the cap, so
-   a claim that cited exactly the expected source drops from 1.0 to 0.3333 for being *better*
-   supported. Either report it over a fixed denominator, or split precision from coverage, or stop
-   treating a verified-but-unexpected citation as a miss — and make corroboration conditional on the
-   claim's existing citations being weak rather than unconditional. The bounds already exist
-   (`--max-corroborations`); what is missing is a rule for when to spend them.
-3. **Give the advanced system a version of its own.** Still open. Every result record reports
-   `systemVersion` `0.1.0` for the advanced system, unchanged across four iterations, so the run
-   artefacts cannot tell you which iteration produced them. Iteration 4 deliberately left it alone
-   for a different reason than Iteration 3 did: Iteration 3 had already taken its measurements and
-   bumping afterwards would have stamped a new version on old results, whereas Iteration 4 changed
-   no system behaviour at all, so a bump would assert a difference that does not exist. Bump
-   `ADVANCED_VERSION` at the *start* of the next iteration that actually changes the pipeline,
-   before any measurement, so the code and the evidence agree.
+   moved the wrong way twice while the primary metric moved the right way, the second time by a
+   third of its value: the precision pass adds two corroborations per claim unconditionally up to
+   the cap, so a claim that cited exactly the expected source drops from 1.0 to 0.3333 for being
+   *better* supported. Either report it over a fixed denominator, or split precision from coverage,
+   or stop treating a verified-but-unexpected citation as a miss — and make corroboration
+   conditional on the claim's existing citations being weak rather than unconditional. The bounds
+   already exist (`--max-corroborations`); what is missing is a rule for when to spend them.
+3. **Give a run record a provenance field, distinct from `systemVersion`.** Sharpened, because two
+   iterations of deferral have shown the original wording asked for the wrong thing. The real
+   problem is unchanged: every result record reports `systemVersion` `0.1.0` for the advanced system
+   across five iterations, so the artefacts on disk cannot tell you which iteration produced them.
+   But bumping `ADVANCED_VERSION` is not the fix — it names *behaviour*, and Iterations 4 and 5
+   changed none, so a bump would assert a difference that does not exist and stamp a new version on
+   results still valid under the old one. What is needed is a separate field — a commit sha, or an
+   iteration number — that answers "which code produced this?" without claiming "this behaves
+   differently". **Do it at the very start of the next measured iteration, before any run.** It
+   changes the run record's shape, which is exactly the kind of change that has to be paid for by a
+   real measurement rather than slipped in beside one: adding it today would break the byte-identity
+   property Iteration 5 just established, and that property is currently the only proof that two
+   iterations of product work left the pipeline alone.
 4. **Then re-measure.** Hypothesis first, in
-   [`docs/improvement-changelog.md`](docs/improvement-changelog.md), before any code changes. That
-   ordering is the reason Iteration 1 could be rejected without argument and Iterations 2 and 3
+   [`docs/improvement-changelog.md`](docs/improvement-changelog.md), **before any code changes.**
+   That ordering is the reason Iteration 1 could be rejected without argument and Iterations 2 and 3
    could be kept without special pleading — and the reason Iteration 3's stated mechanism could be
-   contradicted on the evidence rather than followed off a cliff.
+   contradicted on the evidence rather than followed off a cliff. Iteration 5 broke it and says so
+   in its own entry; the compensating control (the hypothesis still preceded the measurement, and
+   the measurement could have failed) is a smaller thing than the rule, not a substitute for it.
 
-One item is new, and belongs to the product layer rather than the metric:
+Item 5 — *"give an analysis somewhere to live"* — is **closed** by Iteration 5: a SQLite adapter
+behind the `AnalysisStore` seam, exactly as the item specified, with no change to the analysis. Two
+things it deliberately did not do, carried forward as the product layer's own list rather than the
+metric's:
 
-5. **Give an analysis somewhere to live.** The in-memory store holds sixteen entries and does not
-   survive a restart, which is the deliberate consequence of "no database" and is fine for a local
-   tool. If the dashboard is ever to be more than that, the `AnalysisStore` interface is the seam —
-   `save` / `get` / `list`, already the only thing the routes depend on — and the honest version of
-   this work is a persistence adapter behind it, not a change to the analysis.
-
+5. **The store is single-process.** WAL and `busy_timeout` make a second writer safe rather than
+   fast, and nothing coordinates two servers sharing one file. That is correct for a local tool and
+   would be wrong for anything shared — and "anything shared" would also open the questions of
+   authentication and multi-tenancy that this project has deliberately left closed.
+6. **Nothing prunes the database.** An analysis lives until someone deletes it, and a report plus a
+   graph plus an evidence projection is not small. `MAX_STORED_QUESTIONS` bounds one axis; the
+   number of analyses is unbounded by design, because a tool that silently discards the analysis you
+   wanted is worse than one whose file grows. A retention policy is a decision for whoever has too
+   many, not a default worth guessing at.

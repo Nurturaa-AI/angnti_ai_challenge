@@ -15,6 +15,8 @@ export {
   analyzeRepository,
   systemSupportsFocus,
   type AnalysisRun,
+  type AnalysisRunPhase,
+  type AnalysisSystem,
   type AnalyzeRepositoryOptions,
 } from "./service";
 
@@ -54,10 +56,14 @@ export {
 
 export {
   DEFAULT_QUESTION_BUDGET,
+  MAX_HISTORY_TURNS,
   MAX_QUESTION_CHARS,
+  RECONNAISSANCE_TYPES,
   UNSUPPORTED_ANSWER,
   answerQuestion,
+  questionView,
   type AnsweredQuestion,
+  type AnsweredQuestionView,
   type AnswerQuestionOptions,
   type QuestionCitation,
   type QuestionMetricsRecord,
@@ -65,11 +71,55 @@ export {
 } from "./questions";
 
 export {
-  InMemoryAnalysisStore,
+  ANALYSIS_PHASES,
+  ANALYSIS_STATUSES,
+  MAX_STORED_QUESTIONS,
+  TERMINAL_STATUSES,
+  isTerminal,
+  type AnalysisMetadata,
+  type AnalysisPatch,
+  type AnalysisPhase,
+  type AnalysisRecord,
+  type AnalysisStatus,
   type AnalysisStore,
-  type StoredAnalysis,
-  type StoredAnalysisSummary,
-} from "./store";
+  type AnalysisSummary,
+  type NewAnalysis,
+  type StoredEvidenceSource,
+} from "./store/types";
+
+export {
+  MEMORY_DATABASE,
+  SCHEMA_VERSION,
+  SqliteAnalysisStore,
+  type SqliteAnalysisStoreOptions,
+} from "./store/sqlite";
+
+export {
+  DATABASE_ENV_VAR,
+  DEFAULT_DATABASE_DIRECTORY,
+  DEFAULT_DATABASE_FILE,
+  resolveDatabaseLocation,
+  type ResolveDatabaseLocationOptions,
+} from "./store/location";
+
+export { mergeQuestionEvidence, projectEvidence, toContextSources } from "./store/projection";
+
+export {
+  AnalysisEventBus,
+  PHASE_MESSAGES,
+  canTransition,
+  logFailureMessage,
+  safeFailureMessage,
+  type AnalysisEvent,
+  type AnalysisEventType,
+} from "./lifecycle";
+
+export {
+  AnalysisRunner,
+  type AnalysisRunnerDependencies,
+  type StartAnalysisRequest,
+  type StartedAnalysis,
+} from "./runner";
 
 export { resolveRepositoryRequest, type ResolvedRepository } from "./workspace";
 

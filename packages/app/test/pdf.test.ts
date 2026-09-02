@@ -159,8 +159,17 @@ describe("PDF export", () => {
     const text = extractText(bytes);
 
     // Every dashboard section reaches the page.
+    //
+    // Iteration 5 split Iteration 4's single "Overview" into the two sections the
+    // specification asks for — what was analysed, and what it concluded — and added
+    // the metadata, key findings and evidence-reference sections. The list grew rather
+    // than moved: every heading Iteration 4 pinned is still here except "Overview",
+    // whose two halves are now named individually.
     for (const heading of [
-      "Overview",
+      "Repository overview",
+      "Analysis metadata",
+      "Executive briefing",
+      "Key findings",
       "Components",
       "Data flows",
       "Dependencies",
@@ -168,6 +177,7 @@ describe("PDF export", () => {
       "Risks",
       "Architecture graph",
       "Where to start reading",
+      "Evidence references",
       "Evidence audit",
       "Appendix A - Evidence",
       "Appendix B - Artefacts inspected",

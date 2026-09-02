@@ -27,10 +27,13 @@ the property that makes the two comparable. `evaluation` is the runner that join
 `packages/app` is the analysis core the two *user-facing* consumers share, and `apps/web` is
 transport around it. Every arrow points one way; there are no cycles and no back-channels.
 
-The product layer (Iteration 4) is deliberately downstream of everything measured. It reads the
+The product layer (Iterations 4–5) is deliberately downstream of everything measured. It reads the
 pipeline's output and the pipeline's evidence ledger; it does not add a phase, skip one, or
-reorder any. The only change it required inside `runAdvanced` and `runBaseline` was one optional
-callback that hands the finished ledger to whoever asked for it.
+reorder any. The only two changes it has ever required inside `runAdvanced` and `runBaseline` are
+one optional callback that hands the finished ledger to whoever asked for it, and one optional
+callback that says which phase the pipeline has reached. Neither is read by any control flow, and
+a regression test in each system asserts that a run with the observers produces a byte-identical
+record to a run without them.
 
 ---
 
@@ -408,13 +411,22 @@ graph, grounded Q&A and a PDF, all downstream of a pipeline it did not modify. T
 evaluation runs made for it were offline `--mock` runs, which measure the harness and its canned
 text rather than a model.
 
+**Iteration 5 measured that it changed nothing, which for this iteration is the whole claim.** It
+gave an analysis somewhere to live — a SQLite store behind the `AnalysisStore` seam, a runner that
+creates the record before the work, and phase reporting — and touched the measured pipeline only
+by adding the `onPhase` observation hook. Two things were checked rather than asserted: a
+byte-identity regression test in each system, and a re-run of both offline `--mock` evaluations
+whose normalized results are identical to Iteration 4's question by question, score by score,
+citation by citation. Neither system's version was bumped, because `systemVersion` names
+behaviour and the behaviour is provably the same.
+
 Full numbers, the regressions, and the reason mean evidence relevance moved the wrong way twice
 are in [`improvement-changelog.md`](improvement-changelog.md).
 
 
 ---
 
-## `packages/app` — the analysis core (Iteration 4)
+## `packages/app` — the analysis core (Iterations 4–5)
 
 The product layer's whole vocabulary. Nothing here starts a server, parses an argument or writes
 a file; those belong to the things that have a user.
@@ -426,7 +438,12 @@ a file; those belong to the things that have a user.
 | [`architecture.ts`](../packages/app/src/architecture.ts) | `AnalysisReport` → `ArchitectureGraph`: typed nodes, typed edges, deterministic layout. |
 | [`questions.ts`](../packages/app/src/questions.ts) | The grounded question loop: scout, tools, answer, citation extraction, grounding. |
 | [`question-prompt.ts`](../packages/app/src/question-prompt.ts) | The question's prompt and its JSON contract. |
-| [`store.ts`](../packages/app/src/store.ts) | `AnalysisStore` and the bounded in-memory default. |
+| [`lifecycle.ts`](../packages/app/src/lifecycle.ts) | Statuses, phases, the progress event bus, and the browser/operator failure-message pair. |
+| [`runner.ts`](../packages/app/src/runner.ts) | `AnalysisRunner` — request → durable record → pipeline → terminal state. The only writer of status. |
+| [`store/types.ts`](../packages/app/src/store/types.ts) | `AnalysisStore`, the record shape, and what is deliberately absent from it. |
+| [`store/sqlite.ts`](../packages/app/src/store/sqlite.ts) | The durable implementation, on `node:sqlite`. |
+| [`store/location.ts`](../packages/app/src/store/location.ts) | Where the database lives, and the one place it may not. |
+| [`store/projection.ts`](../packages/app/src/store/projection.ts) | `RunRecord` → what is safe and sufficient to persist. |
 | [`workspace.ts`](../packages/app/src/workspace.ts) | `resolveRepositoryRequest` — a client-supplied name → a directory inside the workspace. |
 | [`metrics.ts`](../packages/app/src/metrics.ts) | `ObservabilityRecorder`: analysis, question and export events. |
 | [`export/`](../packages/app/src/export/) | The `ReportExporter` seam, the PDF exporter, and a minimal PDF 1.4 writer. |
@@ -516,13 +533,114 @@ this from the repository evidence I inspected."* And **conversation history neve
 evidence**: earlier turns are replayed as context, capped at six, and the only thing that can be
 cited is repository bytes. A model that quotes its own previous answer has cited nothing.
 
-### The store, and the export seam
+### The store, and what it is allowed to remember
 
-`AnalysisStore` is two methods plus a listing. The default is a bounded map — sixteen entries,
-oldest evicted, re-saving an existing id does not change its age — which is the right failure for
-a tool someone runs locally against one repository at a time, and the wrong one for a shared
-service. That is a reason to write a persistent implementation, not to raise the cap; nothing in
-the interface knows about a database.
+`AnalysisStore` is `create` / `get` / `list` / `update` / `delete`, plus `appendQuestion` and
+`getEvidenceSource`. Through Iteration 4 the only implementation was a bounded map, so an analysis
+lasted as long as the process and "does it survive a restart" was not a question anyone could ask.
+Iteration 5 replaced the default with [`store/sqlite.ts`](../packages/app/src/store/sqlite.ts) and
+left the interface as the seam: the routes depend on it and not on SQLite, so an implementation that
+talks to something over a socket needs no caller to change.
+
+SQLite via **`node:sqlite`**, which ships with Node 22, so the durable store adds no dependency at
+all — the honest reading of "prefer a minimal dependency" when the alternative is a driver, a pool
+and a migration tool for a single-user local file. The module is still experimental in Node 22 and
+prints one warning on import; that warning is left visible rather than suppressed, because it is
+true. The binding is synchronous, so every store method completes without yielding and the
+`Promise` in the interface is shape rather than behaviour. That is also what makes concurrency
+inside one process trivial — two callers cannot interleave inside a method — leaving only another
+process on the same file, which WAL plus `busy_timeout` plus `BEGIN IMMEDIATE` handles.
+
+**The database never lives inside the analysed workspace**, and
+[`resolveDatabaseLocation`](../packages/app/src/store/location.ts) refuses to put it there. The
+workspace this server is pointed at contains repositories nobody vetted; a database inside one of
+them is a file that repository can see, `git status` can notice and a later `git clean` can delete.
+It is also the wrong scope, so the default is one database per *user*
+(`~/.repo-archaeologist/analyses.db`), which survives pointing the server at a different workspace
+tomorrow. Containment is checked against the resolved workspace root, so `..` and a symlinked home
+directory both land where they really point.
+
+**What a record contains is a projection, not a dump** — the argument
+[`store/projection.ts`](../packages/app/src/store/projection.ts) exists to make. A `RunRecord`
+carries the model's prose, every tool call's raw result, the prompts, and an absolute repository
+root. Serialising it would be the shortest path to a durable store and the shortest path to a leak,
+because from then on every consumer would have to remember to strip the same four things. So the
+store takes only what two questions justify: what a question asked after a restart needs (the
+reconnaissance artefacts, which are all `answerQuestion` seeds its ledger from), and what the
+evidence viewer needs (the sources some citation resolves to). The trajectory, the prompts, the
+model text, the absolute root and any uncited artefact are dropped. An uncited scout read still
+appears in `report.sources` as a row of metadata — a claim about what was inspected needs no bytes
+to make it.
+
+Two consequences worth stating, because both are load-bearing. `repositoryPath` is
+**workspace-relative**, so the same database opened by a process started elsewhere still resolves
+and a leaked row says nothing about the host filesystem. And redaction happens **on the way in**
+rather than on the way out: if the in-memory copy were raw and the stored copy redacted, an excerpt
+would render differently before and after a restart, and the line ranges the evidence viewer
+computes against the text it displays would shift by every replacement. Redacting first makes those
+offsets correct by construction. The ledger the pipeline *grounds* against is still the raw one —
+grounding has to compare an excerpt with what the file really says — and the projection is taken
+after grounding has finished.
+
+`getEvidenceSource` takes **both** ids, which is what the evidence route's `404` rests on: an
+evidence id from another analysis resolves to nothing rather than to someone else's bytes. Two
+repositories legitimately contain the same path, so the primary key is the pair and neither row
+wins.
+
+A database whose `schema_version` is **newer** than the build understands is refused rather than
+opened. Silently ignoring a column is how a durable store starts losing data, and an older binary
+cannot know which column it is about to ignore. In the other direction a single unreadable JSON
+payload costs that analysis its report, not the dashboard its list — every consumer already handles
+a `null` report, because a queued analysis has none either.
+
+### Progress, without inventing any
+
+[`lifecycle.ts`](../packages/app/src/lifecycle.ts) holds five statuses and eight phases, and the
+distinction between them is deliberate: a **status** is a promise about what the record contains, a
+**phase** is an observation about where the pipeline got to. So finer progress became phases rather
+than more statuses, and there is no interpolation, no percentage and no fake progress bar — a phase
+appears when the pipeline reaches it and not before.
+
+The pipelines report phases through `onPhase`, an option with exactly the contract `onSources`
+already had: a name from a closed vocabulary, nothing else, no control flow reading it, its return
+value discarded. It was added to the *measured* path, so an observation hook that turned out to be a
+participant would silently invalidate every number recorded against these systems. A regression test
+in each system asserts a run with no observer produces a **byte-identical record** to one with it,
+and Iteration 5's mock evaluation results are byte-identical to Iteration 4's for the same reason.
+
+`AnalysisEventBus` is per-analysis publish/subscribe with a bounded replay buffer. Replay is what
+makes the stream usable rather than merely correct: a browser that posts an analysis and then opens
+the event stream is always a round trip late, so without it a client would reliably miss
+`analysis.created` and often `analysis.started`. It is bounded twice — per analysis, and in how many
+analyses it buffers at all — because it is a live-progress buffer, not a record. The record is the
+database.
+
+`safeFailureMessage` and `logFailureMessage` are deliberately adjacent, because confusing them is
+the bug the module exists to prevent. One is for a browser and one is for a terminal. The rule is
+that the error's *category* decides whether its text survives: our own error types were written to
+be read by the person who caused them, so their message passes through redacted, while anything
+unanticipated is replaced wholesale — its message is a filesystem path, a SQL fragment or a stack
+frame at least as often as it is an explanation. The `hint` is dropped even for our own errors,
+because hints tell an *operator* which file to look at.
+
+### The runner: a record before the work
+
+[`runner.ts`](../packages/app/src/runner.ts) is the only writer of analysis status. Iteration 4 ran
+the pipeline inline inside a request handler, which made "the analysis succeeded" and "the client is
+still connected" the same fact. Separating them costs one indirection and buys three things: a
+record that exists before the work does, so a client that navigates away has not lost its analysis;
+a status a second client can read; and one place where failure becomes something safe to show.
+
+A failure is therefore a **`failed` record, not a rejected promise** — by the time the pipeline
+runs, the caller that asked may be gone and there is nobody to catch. Which validation happens
+before the record exists is chosen on the same principle: a system name or a focus the baseline
+cannot honour is a request error the client should fix, while "that directory is not in the
+workspace" is a *result* the user should find in the list on reload rather than a `400` that
+vanishes. The runner does not queue, retry or schedule — one analysis per call, run immediately, on
+this process. A queue would be the right answer to a problem a loopback tool for one user does not
+have.
+
+### The export seam
 
 `ReportExporter` is `{ format, contentType, filename(report), export(input) }`. The one
 implementation renders a PDF. It has no dependency and starts no browser:

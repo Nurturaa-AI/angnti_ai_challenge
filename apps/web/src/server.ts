@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { serializeJson, type ApiRequest } from "./api";
+import { serializeJson, type ApiRequest, type StreamChannel } from "./api";
 import { createApi, type ApiDependencies, type WebApi } from "./routes";
 import { readStaticAsset } from "./static";
 
@@ -212,6 +212,10 @@ async function serveApi(
     send(response, result.status, "application/json; charset=utf-8", Buffer.from(serializeJson(result.value), "utf8"));
     return;
   }
+  if (result.kind === "stream") {
+    openStream(response, result.status, result.contentType, result.open);
+    return;
+  }
 
   const headers: Record<string, string> = {};
   if (result.filename !== undefined) {
@@ -219,6 +223,78 @@ async function serveApi(
     headers["content-disposition"] = `attachment; filename="${result.filename}"`;
   }
   send(response, result.status, result.contentType, Buffer.from(result.bytes), headers);
+}
+
+/**
+ * Holds the response open and frames server-sent events into it.
+ *
+ * The one place in the codebase that writes a response without a `content-length`,
+ * which is the whole difference between this and `send`: a stream's length is not
+ * known when its headers go out. Everything else is the same — the security headers
+ * are the same headers, and every byte written is framed by the two writers below,
+ * so a route cannot emit an unframed line even by accident.
+ *
+ * `redactSecrets` runs on each event's data for exactly the reason it runs in
+ * `serializeJson`: this is a boundary where content leaves the process, and a
+ * choke point cannot be forgotten by a route added later. Progress events carry
+ * phase names and safe error sentences today; that is a property of `lifecycle.ts`
+ * rather than of this function, and this function should not be the thing that has
+ * to stay true.
+ */
+function openStream(
+  response: ServerResponse,
+  status: number,
+  contentType: string,
+  open: (channel: StreamChannel) => (() => void) | void,
+): void {
+  response.writeHead(status, {
+    ...SECURITY_HEADERS,
+    "content-type": contentType,
+    // Two independent instructions not to buffer: one for a browser or proxy that
+    // reads `Cache-Control`, one for nginx, which reads neither.
+    "cache-control": "no-cache, no-transform",
+    "x-accel-buffering": "no",
+    connection: "keep-alive",
+  });
+  response.flushHeaders();
+
+  let ended = false;
+  const write = (payload: string): void => {
+    if (ended || response.writableEnded) return;
+    response.write(payload);
+  };
+
+  const channel: StreamChannel = {
+    send: (event, data) => {
+      // One `data:` line: `serializeJson` cannot produce a newline, because
+      // `JSON.stringify` escapes them. An event whose data spanned lines would be
+      // read as several events, so this is load-bearing rather than incidental.
+      write(`event: ${event}\ndata: ${serializeJson(data)}\n\n`);
+    },
+    comment: (text) => {
+      write(`: ${text.replace(/[\r\n]+/g, " ")}\n\n`);
+    },
+    close: () => {
+      if (ended) return;
+      ended = true;
+      response.end();
+    },
+  };
+
+  const teardown = open(channel);
+
+  // A browser that navigates away, or a `close()` from the route itself: either
+  // way the route's teardown runs exactly once, so a subscription cannot outlive
+  // the socket it was feeding.
+  let torn = false;
+  const tearDownOnce = (): void => {
+    if (torn) return;
+    torn = true;
+    ended = true;
+    if (typeof teardown === "function") teardown();
+  };
+  response.on("close", tearDownOnce);
+  response.on("finish", tearDownOnce);
 }
 
 /**

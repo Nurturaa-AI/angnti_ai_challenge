@@ -55,7 +55,20 @@ export interface RunBaselineOptions {
    * callback behaves identically to one before this option existed.
    */
   onSources?: ((sources: readonly ContextSourceText[]) => void) | undefined;
+
+  /**
+   * Receives the name of each phase as the run reaches it.
+   *
+   * Same contract as `onSources`: a phase *name*, nothing else, observed rather
+   * than requested, with no control flow reading it and its return value
+   * discarded. A run with no callback produces a byte-identical record to one
+   * with it, and a regression test asserts that.
+   */
+  onPhase?: ((phase: BaselinePhase) => void) | undefined;
 }
+
+/** The phases of a baseline run, in order. A closed vocabulary, not a free string. */
+export type BaselinePhase = "collecting-context" | "synthesizing" | "validating-schema" | "grounding";
 
 export async function runBaseline(options: RunBaselineOptions): Promise<RunRecord> {
   const now = options.now ?? ((): Date => new Date());
@@ -63,6 +76,7 @@ export async function runBaseline(options: RunBaselineOptions): Promise<RunRecor
   const trajectory = new TrajectoryRecorder(() => now().getTime());
 
   // 1. Shallow context collection — the baseline's entire view of the repository.
+  options.onPhase?.("collecting-context");
   const context = collectRepositoryContext(options.repositoryPath, options.collectOptions);
   options.onSources?.(context.sources);
   trajectory.step("collect-context", {
@@ -78,6 +92,7 @@ export async function runBaseline(options: RunBaselineOptions): Promise<RunRecor
   const client = options.client ?? createLlmClient(options.config);
 
   // 3. One model call.
+  options.onPhase?.("synthesizing");
   const response = await client.generateStructured({
     systemInstruction: BASELINE_SYSTEM_INSTRUCTION,
     input: prompt,
@@ -92,6 +107,7 @@ export async function runBaseline(options: RunBaselineOptions): Promise<RunRecor
 
   // 4. Parse and validate. A malformed response fails loudly rather than
   //    degrading into a partially-populated briefing.
+  options.onPhase?.("validating-schema");
   const parsed = parseModelJson(response.text);
   const body = validateWithSchema(AnalysisBodySchema, parsed, "model analysis");
   trajectory.step("validate-schema", {
@@ -101,6 +117,7 @@ export async function runBaseline(options: RunBaselineOptions): Promise<RunRecor
   });
 
   // 5. Grounding: drop every citation the system cannot prove it received.
+  options.onPhase?.("grounding");
   const { body: groundedBody, audit } = groundAnalysis(body, context.sources);
   trajectory.step("ground-evidence", {
     claimed: audit.claimed,
