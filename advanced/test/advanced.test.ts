@@ -16,7 +16,13 @@ import {
 } from "@repo-arch/shared";
 import { scoreCase } from "@repo-arch/evaluator";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ADVANCED_RESPONSE_SCHEMA, ADVANCED_SYSTEM_NAME, buildRunId, runAdvanced } from "../src/index";
+import {
+  ADVANCED_RESPONSE_SCHEMA,
+  ADVANCED_SYSTEM_NAME,
+  buildRunId,
+  runAdvanced,
+  type AdvancedPhase,
+} from "../src/index";
 
 /**
  * The advanced system, end to end, with the model replaced by a script.
@@ -869,5 +875,91 @@ describe("the mock provider exercises a real tool trajectory offline", () => {
     expect(fileSource?.id).toBe(exploration?.filesRead[0]);
     expect(record.meta.evidenceAudit.dropped).toEqual([]);
     expect(record.result.evidence.some((entry) => entry.type === "file")).toBe(true);
+  });
+});
+
+/**
+ * The claim `onPhase`'s own doc comment makes, asserted.
+ *
+ * The comment on `RunAdvancedOptions.onPhase` says a run with no callback produces
+ * a byte-identical record to one with it, and names a regression test as the thing
+ * that holds it to that. This is that test. It matters because the option was added
+ * to the *measured* path: an observation hook that turned out to be a participant
+ * would silently invalidate every number recorded against this system.
+ */
+describe("runAdvanced — phase reporting is an observation, not a participant", () => {
+  const script = (): ScriptedClient =>
+    new ScriptedClient(
+      [
+        { text: "Looking for the dispatcher.", toolCalls: [call("c1", "read_file", { path: "src/dispatch.js" })] },
+        { text: "That answers it." },
+      ],
+      body(),
+    );
+
+  it("reports each phase once, in the order the pipeline reaches them", async () => {
+    const seen: AdvancedPhase[] = [];
+
+    await runAdvanced({
+      repositoryPath: root,
+      config,
+      client: script(),
+      now: fixedClock(),
+      onPhase: (phase) => seen.push(phase),
+    });
+
+    // Every phase in the declared vocabulary, exactly once, in pipeline order.
+    // `exploring` appears once for the whole loop rather than once per turn: it
+    // names the phase, not the iteration.
+    expect(seen).toEqual([
+      "collecting-context",
+      "scouting",
+      "exploring",
+      "synthesizing",
+      "validating-schema",
+      "refining-evidence",
+      "grounding",
+    ]);
+  });
+
+  it("produces a byte-identical record with and without an observer", async () => {
+    const observed = await runAdvanced({
+      repositoryPath: root,
+      config,
+      client: script(),
+      now: fixedClock(),
+      onPhase: () => {
+        // Deliberately does work and returns a value. Neither may reach the run.
+        return "ignored" as unknown as void;
+      },
+    });
+
+    const unobserved = await runAdvanced({
+      repositoryPath: root,
+      config,
+      client: script(),
+      now: fixedClock(),
+    });
+
+    // Byte-identical, not merely equivalent: the run id, every trajectory
+    // timestamp, the ledger and the grounding audit all have to match.
+    expect(JSON.stringify(observed)).toBe(JSON.stringify(unobserved));
+  });
+
+  it("hands over a phase name and nothing else", async () => {
+    const seen: unknown[] = [];
+
+    await runAdvanced({
+      repositoryPath: root,
+      config,
+      client: script(),
+      now: fixedClock(),
+      // Typed as one parameter; called with one. A second argument would be a
+      // channel for prompts or tool results, which is what this forbids.
+      onPhase: (...args: unknown[]) => seen.push(args),
+    });
+
+    expect(seen.every((args) => Array.isArray(args) && args.length === 1)).toBe(true);
+    expect(seen.every((args) => typeof (args as unknown[])[0] === "string")).toBe(true);
   });
 });

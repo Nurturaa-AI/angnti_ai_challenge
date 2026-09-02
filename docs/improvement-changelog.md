@@ -875,3 +875,182 @@ $0.00. No paid model call was made in this iteration: the mock evaluation runs, 
 and the manual UI walkthrough are all offline. The cost was entirely in engineering time, and the
 thing it bought is not a number on the benchmark — it is that a claim in the briefing is now two
 clicks from the bytes that justify it.
+
+---
+
+## Iteration 5 — Somewhere for an Analysis to Live
+
+### Hypothesis
+
+Like Iteration 4, this one makes no claim about the metric, and for the same structural reason:
+everything it adds is downstream of the pipeline. Unlike Iteration 4, the property it claims is
+one that could plausibly have been broken by the change, so the claim is stated as the thing that
+was actually checked:
+
+> An analysis can be given a durable home and a live progress feed such that (a) the pipeline's
+> measured behaviour is byte-for-byte unchanged, and (b) the store persists strictly less than the
+> run record contains — reconnaissance artefacts and cited sources, never model prose, raw tool
+> results, prompts, or an absolute host path.
+
+Both halves are falsifiable, and the ways they fail are specific. Progress reporting means putting
+a callback *inside* `runAdvanced` and `runBaseline` — the measured path — so a mistake there moves
+the comparison the whole project rests on. Persistence means writing a run record to disk, and the
+cheapest way to do that is `JSON.stringify` on the whole thing, which would put a model's
+paraphrase of a file on disk next to the ledger the paraphrase is supposed to be checked against,
+and an absolute path in a record a different machine is expected to open.
+
+**This hypothesis was written after the code, and that is a breach of this file's own rule.** It is
+recorded rather than hidden. The compensating control is that it was written before any
+*measurement*: the byte-identity tests and the evaluation re-run below could both have failed, and
+either would have rejected the iteration as written. What is lost by the ordering is the discipline
+of having to predict; what is not lost is falsifiability.
+
+### Change
+
+Three modules, one seam filled in, and one callback on the measured path.
+
+**The store, behind the seam Iteration 4 left.** `AnalysisStore` was declared with a bounded map
+behind it; it now also has `SqliteAnalysisStore` over `node:sqlite` — in Node 22's standard
+library, so a durable store costs zero new dependencies. WAL, `busy_timeout=5000`, `BEGIN
+IMMEDIATE` for the read-modify-write paths, four tables, a `SCHEMA_VERSION` a newer binary's file
+is *refused* on rather than silently misread.
+
+Three decisions inside it are worth more than the SQL:
+
+- **It refuses to live inside the repository it analyses.** `resolveDatabaseLocation` rejects a
+  path under the workspace root, because a database there is a file the analysis can see, `git
+  status` reports, and `git clean` deletes. Default `~/.repo-archaeologist/analyses.db`.
+- **It persists a projection, not a dump.** A `RunRecord` carries model prose, raw tool results and
+  prompts; `projectEvidence` keeps the reconnaissance artefacts `answerQuestion` seeds from plus
+  the sources some citation actually resolves to, and drops the rest. Less on disk is the feature.
+- **Redaction happens on the way in.** An excerpt is redacted before it is stored, so a restart
+  cannot change what the viewer shows and the line offsets stay correct by construction. The
+  grounding ledger the pipeline compares against is untouched and stays raw.
+
+Paths are stored workspace-relative, and evidence is looked up by both ids
+(`getEvidenceSource(analysisId, sourceId)`) — which is what makes an id from another analysis a
+`404` rather than a leak.
+
+**A runner, so a record exists before the work.** `AnalysisRunner.start` creates the `queued` row
+and returns it, then runs the pipeline detached. `run` never rejects: by the time the pipeline
+finishes, the client that asked may be gone and there is nobody to catch. A failure is a `failed`
+*record* the user finds on reload.
+
+**Progress, without inventing any.** A status is a promise about what the record contains; a phase
+is an observation about where the pipeline got to. Five statuses with an explicit transition table
+that cannot leave a terminal state, eight phases with one line of prose each. No percentage, no
+interpolation, no estimated remaining time — the pipeline does not know, so the UI does not claim.
+`safeFailureMessage` and `logFailureMessage` are a deliberate pair: the error's *category* decides
+whether its text reaches a browser, and a `hint` — written for an operator — never does.
+
+**The measured path's entire footprint** is `onPhase`, an optional callback on `runAdvanced` and
+`runBaseline` called at the phase boundaries that already had numbered comments. Its vocabulary is
+closed, no control flow reads it, its return value is discarded, and the evaluator passes none.
+
+### Measurement
+
+**No paid evaluation run was made, and no benchmark movement is claimed.** The reasons are
+Iteration 4's, unchanged: nothing on the measured path behaves differently, and
+`gemini-3.5-flash-lite` has been at 14/14 since Iteration 3, so the dataset has no headroom to
+show a movement even if one existed. Iteration 3's figures remain the last real measurement.
+
+What was run instead is the check the hypothesis names — that the pipeline is unchanged — and it
+was run two independent ways.
+
+**First, byte-identity as a unit test, in each system.** A run with an observer that returns a
+value it should not (`() => "ignored" as unknown as void`) is `JSON.stringify`-compared against a
+run without one, over the same repository, the same scripted model reply and the same fixed clock.
+Both assert equality of the whole record. These tests are the ones `onPhase`'s doc comment in both
+systems already *claimed* existed and did not: closing that gap was the first work of this session,
+because a comment naming a test that was never written is worse than no comment.
+
+There was a second comment of the same kind, found while writing this entry. `public/ui.js` and
+`public/ui.d.ts` both said the pure-logic module is imported by `apps/web/test/ui.test.ts`, which
+did not exist — and that file is the *entire* justification for splitting `ui.js` out of `app.js`,
+since `app.js` touches the DOM and can only ever be read by a human. Without it the split was a
+filing convention. `ui.test.ts` now exists, at 50 tests, and three of them are the ones the
+duplication actually needed: the browser's phase list is compared to `ANALYSIS_PHASES`, its status
+vocabulary to `ANALYSIS_STATUSES`, and its node palette to `NODE_TYPES`, so a constant added on the
+server and forgotten in the browser fails a test instead of rendering `undefined` in a sidebar.
+
+**Second, both offline `--mock` evaluations, re-run and diffed against Iteration 4's:**
+
+| | Baseline `--mock` | Advanced `--mock` |
+| --- | --- | --- |
+| Run id | `eval-baseline-2026-09-02T01-28-27Z` | `eval-advanced-2026-09-02T01-29-00Z` |
+| Evidence-backed task accuracy | 21.4 % (3/14) | 28.6 % (4/14) |
+| Per case | 2/7 and 1/7 | 2/7 and 2/7 |
+| Fabrications / dropped / unsupported | 0 / 0 / 0 | 0 / 0 / 0 |
+| Failed cases | 0 / 2 | 0 / 2 |
+| Normalized JSON diff vs Iteration 4's runs | **identical** | **identical** |
+
+The last row is the one that matters, and it is stronger than the headline percentages agreeing.
+Two percentages can match while the underlying answers differ. With run ids, timestamps and
+durations normalized out, every question, every score, every citation and every dropped-citation
+record is the same object it was before this iteration existed.
+
+| Check | Result |
+| --- | --- |
+| Files changed under `evaluation/`, `fixtures/`, `packages/evaluator/`, `reports/`, `trajectories/` | **0** |
+| Evaluation cases modified | 0 (no question, `expectedEvidence` or keyword touched) |
+| Byte-identity regression test, advanced and baseline | Passing in both |
+| Phase vocabulary reported by each system | 7 advanced / 4 baseline — the baseline never scouts, explores or refines, and its type says so |
+| Tests | 491 → **620**, all passing, offline; no existing test deleted or weakened |
+| `pnpm typecheck` | Clean |
+
+The 129 new tests are where the hypothesis's second half is checked, and they are aimed at the
+failure modes rather than the happy path: the list-view row's exact key set is asserted, proving no
+payload column reaches a list; a record's serialized form is asserted not to contain the workspace
+path; an evidence id from one analysis is invisible to another; a schema version from the future is
+refused; a corrupt `report` column reads as `null` without losing the record; an unrecognised status
+reads as `failed` rather than as itself; a `StorageError`'s path lives in its `hint` and not its
+`message`; a subscriber that throws cannot fail the analysis; a store whose `update` always throws
+still produces a `failed` result plus a log saying it could not be marked failed; and the evidence
+viewer's line range is asserted to be `null` — never line 1 — for an excerpt it could not locate.
+
+Two of those tests failed on first run and both failures taught something. One assumed the record
+was still `queued` when `start` returned — it is usually `validating`, because the SQLite binding
+is synchronous and the first status write commits before the function yields. The other objected to
+the caller's own `../../etc` appearing in an error message; echoing back what the caller typed is
+not a leak, and the assertion was wrong, not the code.
+
+### Result
+
+**Kept, with the claim scoped to what was verified.** An analysis survives a page reload, a
+navigation away and a server restart; a client that reconnects mid-run is told which phase the
+pipeline is in and misses no earlier event, because the bus replays. The pipeline is provably
+unchanged — twice over, by unit test and by re-measurement.
+
+What is **not** claimed: that the analysis got better, that any metric moved, or that a store makes
+fourteen questions a larger dataset. The `node:sqlite` experimental warning is left visible on
+stderr rather than suppressed, because a suppressed warning is a promise the project cannot keep.
+
+### Decision
+
+**Iteration 5 is kept.** Three things are recorded rather than buried.
+
+`ADVANCED_VERSION` and `BASELINE_VERSION` were again deliberately **not** bumped, and this time the
+reason is evidence rather than judgement: `systemVersion` names *behaviour*, and byte-identity is a
+proof that the behaviour is the same. Bumping would assert a difference that does not exist and
+would make results that are still valid look stale. What item 3 of the previous `## Next` actually
+needs is a **provenance** field distinct from the behaviour version — and adding one changes the
+run-record shape, which would break the byte-identity claim just verified. So it is now scoped
+explicitly to the *start* of the next measured iteration, where a shape change is paid for by a
+real measurement. Only the root project version moved, `0.5.0` → `0.6.0`.
+
+The hypothesis-after-code ordering is recorded in the Hypothesis section above rather than tidied
+away. The rule at the top of this file says an iteration is not an improvement until a paired
+evaluation says so; the rule it does not state, but which the first four entries all honoured, is
+that the prediction comes first. This entry breaks the second and honours the first.
+
+And the measured path was touched — for the first time since Iteration 3 — by something no
+evaluation number can catch. That is exactly why the check is a byte-identity test rather than a
+percentage: a hook that changed the record would have moved *both* systems together, and the
+comparison between them would have looked untroubled.
+
+### Cost of the result
+
+$0.00. No paid model call was made: both evaluation runs are the offline mock provider, and the
+620-test suite and the typecheck are offline by construction. 2 378 lines of source and 1 870 lines
+of test, and the thing they buy is not a number on the benchmark — it is that closing the tab is no
+longer the same event as losing the analysis.

@@ -11,7 +11,7 @@ import {
   type StructuredRequest,
 } from "@repo-arch/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { BASELINE_SYSTEM_NAME, buildRunId, runBaseline } from "../src/index";
+import { BASELINE_SYSTEM_NAME, buildRunId, runBaseline, type BaselinePhase } from "../src/index";
 
 /**
  * The baseline, end to end, with the model replaced by a stub.
@@ -339,5 +339,61 @@ describe("renderBriefingMarkdown", () => {
     const markdown = renderBriefingMarkdown(record);
     expect(markdown).not.toContain("AIzaFAKEKEYFAKEKEYFAKEKEY");
     expect(JSON.stringify(record)).not.toContain("AIzaFAKEKEYFAKEKEYFAKEKEY");
+  });
+});
+
+/**
+ * The claim `onPhase`'s own doc comment makes, asserted.
+ *
+ * The comment on `RunBaselineOptions.onPhase` says a run with no callback produces
+ * a byte-identical record to one with it, and names a regression test as the thing
+ * that holds it to that. This is that test. The baseline is the control the advanced
+ * system is measured against, so an observation hook that changed its output would
+ * move the *comparison* even if both systems moved together.
+ */
+describe("runBaseline — phase reporting is an observation, not a participant", () => {
+  it("reports each phase once, in the order the pipeline reaches them", async () => {
+    write("README.md", "# demo\n\nA demo HTTP service.\n");
+    const seen: BaselinePhase[] = [];
+
+    await runBaseline({
+      repositoryPath: root,
+      config,
+      client: stubClient(briefing()),
+      now,
+      onPhase: (phase) => seen.push(phase),
+    });
+
+    // Four, not the advanced system's seven. The baseline never scouts, never
+    // explores and never refines evidence, and its phase vocabulary says so
+    // rather than reporting phases it does not perform.
+    expect(seen).toEqual(["collecting-context", "synthesizing", "validating-schema", "grounding"]);
+  });
+
+  it("produces a byte-identical record with and without an observer", async () => {
+    write("README.md", "# demo\n\nA demo HTTP service.\n");
+    write("package.json", '{ "name": "demo", "dependencies": { "express": "^4.19.2" } }\n');
+
+    const observed = await runBaseline({
+      repositoryPath: root,
+      config,
+      client: stubClient(briefing()),
+      now,
+      onPhase: () => "ignored" as unknown as void,
+    });
+
+    // The clock is module state advanced by `now`, so it has to be rewound for the
+    // second run to be comparable at all. Rewinding it is the whole point: with the
+    // same clock, the same repository and the same scripted reply, the only
+    // difference left between the two runs is the observer.
+    clock = Date.parse("2026-01-01T00:00:00.000Z");
+    const unobserved = await runBaseline({
+      repositoryPath: root,
+      config,
+      client: stubClient(briefing()),
+      now,
+    });
+
+    expect(JSON.stringify(observed)).toBe(JSON.stringify(unobserved));
   });
 });

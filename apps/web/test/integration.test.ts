@@ -3,7 +3,14 @@ import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DEFAULT_EXPLORATION_BUDGET, DEFAULT_PRECISION_POLICY, createLlmClient, type AnalysisConfig } from "@repo-arch/shared";
-import type { AnalysisReport, AnsweredQuestion, ArchitectureGraph } from "@repo-arch/app";
+import {
+  MEMORY_DATABASE,
+  SqliteAnalysisStore,
+  type AnalysisReport,
+  type AnalysisStore,
+  type AnsweredQuestion,
+  type ArchitectureGraph,
+} from "@repo-arch/app";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startWebServer, type RunningServer } from "../src/server";
 
@@ -27,6 +34,15 @@ const SECRET = "AKIAIOSFODNN7EXAMPLE";
 let base: string;
 let workspace: string;
 let server: RunningServer;
+/** Every store opened here, so none is left holding a connection at teardown. */
+const stores: AnalysisStore[] = [];
+
+/** A store of its own per server, in memory: one connection, no shared rows. */
+function newStore(): AnalysisStore {
+  const store = new SqliteAnalysisStore({ location: MEMORY_DATABASE });
+  stores.push(store);
+  return store;
+}
 
 const config: AnalysisConfig = {
   provider: "mock",
@@ -138,11 +154,13 @@ beforeAll(async () => {
     budget: DEFAULT_EXPLORATION_BUDGET,
     precisionPolicy: DEFAULT_PRECISION_POLICY,
     client: createLlmClient(config),
+    store: newStore(),
   });
 });
 
 afterAll(async () => {
   if (server) await server.close();
+  for (const store of stores) await store.close();
   if (base) rmSync(base, { recursive: true, force: true });
 });
 
@@ -342,6 +360,7 @@ describe("the web application over HTTP", () => {
       budget: DEFAULT_EXPLORATION_BUDGET,
       precisionPolicy: DEFAULT_PRECISION_POLICY,
       client: createLlmClient(config),
+      store: newStore(),
     });
 
     try {

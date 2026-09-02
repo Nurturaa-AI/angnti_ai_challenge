@@ -1,6 +1,6 @@
 import { redactSecrets } from "@repo-arch/shared";
-import type { ArchitectureEdge, ArchitectureGraph } from "../architecture";
-import type { AnsweredQuestion } from "../questions";
+import type { ArchitectureEdge, ArchitectureGraph, ArchitectureNode } from "../architecture";
+import type { AnsweredQuestionView } from "../questions";
 import type { AnalysisReport, ReportEvidence } from "../report";
 import { PDF_LETTER, PdfWriter, type PdfFont } from "./pdf/writer";
 import type { ExportInput, ReportExporter } from "./types";
@@ -46,6 +46,10 @@ const WARN: readonly [number, number, number] = [0.7, 0.28, 0.1];
 const RULE: readonly [number, number, number] = [0.85, 0.86, 0.88];
 const PAPER_TINT: readonly [number, number, number] = [0.96, 0.965, 0.97];
 const WHITE: readonly [number, number, number] = [1, 1, 1];
+/** The diagram's box fill and its border. Light enough to read black text on. */
+const BOX_FILL: readonly [number, number, number] = [0.93, 0.95, 0.97];
+const BOX_EDGE: readonly [number, number, number] = [0.62, 0.68, 0.75];
+const WIRE: readonly [number, number, number] = [0.72, 0.76, 0.8];
 
 /** Bounds on untrusted text. Generous enough to be useful, small enough to be finite. */
 const MAX_EXCERPT_CHARS = 320;
@@ -79,7 +83,14 @@ export class PdfReportExporter implements ReportExporter {
     return `repo-analysis-${name}-${id}.pdf`;
   }
 
-  /** Synchronous by nature; `export` wraps it so the seam can host async exporters. */
+  /**
+   * Synchronous by nature; `export` wraps it so the seam can host async exporters.
+   *
+   * The section order is the document's argument, and it is deliberate: what was
+   * analysed, under what conditions, what it concluded, what the shape is, then the
+   * detail, then the questions, then every citation. A reader who stops after page
+   * three has the findings and knows how much to trust them.
+   */
   private render(input: ExportInput): Uint8Array {
     const { report, graph, questions } = input;
     const pdf = new PdfWriter(
@@ -98,15 +109,19 @@ export class PdfReportExporter implements ReportExporter {
 
     writeCover(doc, report, graph, questions);
     doc.newPage(); // The cover owns page one.
-    writeOverview(doc, report);
+    writeRepositoryOverview(doc, report);
+    writeAnalysisMetadata(doc, report, input);
+    writeExecutiveBriefing(doc, report);
+    writeArchitectureVisualization(doc, graph);
+    writeKeyFindings(doc, report, graph);
     writeComponents(doc, report);
     writeFlows(doc, report);
     writeDependencies(doc, report);
     writeTesting(doc, report);
     writeRisks(doc, report);
-    writeArchitecture(doc, graph);
     writeReading(doc, report);
     writeQuestions(doc, questions);
+    writeEvidenceReferences(doc, report, graph);
     writeAudit(doc, report, graph);
     writeEvidenceAppendix(doc, report);
     writeSourceAppendix(doc, report);
@@ -134,7 +149,7 @@ function writeCover(
   doc: Doc,
   report: AnalysisReport,
   graph: ArchitectureGraph,
-  questions: readonly AnsweredQuestion[],
+  questions: readonly AnsweredQuestionView[],
 ): void {
   doc.accentBar();
   doc.eyebrow("REPOSITORY ANALYSIS");
@@ -178,8 +193,79 @@ function writeCover(
   );
 }
 
-function writeOverview(doc: Doc, report: AnalysisReport): void {
-  doc.heading("Overview");
+/** What was analysed. Repeated from the cover because a cover gets detached. */
+function writeRepositoryOverview(doc: Doc, report: AnalysisReport): void {
+  const repository = report.repository;
+  doc.heading("Repository overview", clean(repository.path));
+
+  doc.keyValue("Name", clean(repository.name));
+  doc.keyValue("Path", line(repository.path));
+  doc.keyValue("Files", String(repository.fileCount));
+  doc.keyValue("Directories", String(repository.directoryCount));
+  doc.keyValue("Size on disk", bytes(repository.totalBytes));
+  doc.keyValue("Version control", repository.isGitRepository ? "git" : "not a git working tree");
+  const head = repository.head;
+  if (head !== null) {
+    doc.keyValue("Commit", clean(head.commit));
+    doc.keyValue("Branch", clean(head.branch));
+  }
+
+  if (repository.languages.length > 0) {
+    doc.spacer(6);
+    doc.subheading("File types by count");
+    for (const language of capped(repository.languages, 12)) {
+      doc.row(clean(language.extension), count(language.files, "file"));
+    }
+  }
+}
+
+/**
+ * Under what conditions. The part a reader needs to reproduce or date the analysis.
+ *
+ * The path printed here is the workspace-relative one the store holds, never the
+ * absolute root — the same rule the API DTOs follow, for the same reason: this
+ * document leaves the machine that made it.
+ */
+function writeAnalysisMetadata(doc: Doc, report: AnalysisReport, input: ExportInput): void {
+  doc.heading("Analysis metadata");
+
+  doc.keyValue("Analysis id", clean(input.analysisId ?? report.id));
+  doc.keyValue("Report id", clean(report.id));
+  doc.keyValue("System", `${clean(report.system)} ${clean(report.systemVersion)}`);
+  doc.keyValue("Provider", clean(report.provider));
+  doc.keyValue("Model", clean(report.model));
+  if (input.repositoryPath !== undefined) {
+    doc.keyValue("Workspace path", line(input.repositoryPath));
+  }
+  if (input.createdAt !== undefined) doc.keyValue("Requested", clean(input.createdAt));
+  doc.keyValue("Started", clean(report.startedAt));
+  doc.keyValue("Finished", clean(report.finishedAt));
+  doc.keyValue("Pipeline duration", duration(report.metrics.durationMs));
+  if (input.durationMs !== undefined && input.durationMs !== null) {
+    doc.keyValue("Lifecycle duration", duration(input.durationMs));
+  }
+  doc.keyValue("Schema version", String(report.schemaVersion));
+
+  doc.spacer(8);
+  doc.panel((panel) => {
+    panel.eyebrow("MEASUREMENT");
+    panel.spacer(4);
+    const m = report.metrics;
+    panel.keyValue("Tool calls", String(m.toolCalls));
+    panel.keyValue("Scout file reads", String(m.scoutFilesRead));
+    panel.keyValue("Files inspected", String(m.filesInspected));
+    panel.keyValue("Ledger artefacts", String(m.ledgerSources));
+    panel.keyValue("Evidence items", String(m.evidenceCount));
+    panel.keyValue("Tokens", `${m.inputTokens} in, ${m.outputTokens} out`);
+    panel.keyValue(
+      "Estimated cost",
+      m.estimatedCostUsd === null ? "not priced for this model" : `$${m.estimatedCostUsd.toFixed(4)}`,
+    );
+  });
+}
+
+function writeExecutiveBriefing(doc: Doc, report: AnalysisReport): void {
+  doc.heading("Executive briefing");
   if (report.overviewEvidenceIds.length === 0) {
     doc.stamp("UNVERIFIED — NO GROUNDED CITATION");
     doc.spacer(4);
@@ -196,6 +282,57 @@ function writeOverview(doc: Doc, report: AnalysisReport): void {
     doc.subheading("Open questions the analysis could not settle");
     for (const question of capped(report.openQuestions)) doc.bullet(line(question));
   }
+}
+
+/**
+ * The digest: the highest-severity risks, the testing gaps, and the shape.
+ *
+ * Not a new claim — every line here is a claim printed in full further down, with the
+ * same evidence ids. It exists because a fifteen-page document buries its findings,
+ * and a reader who prints this and walks into a meeting needs page two to be the
+ * findings rather than the table of contents.
+ */
+function writeKeyFindings(doc: Doc, report: AnalysisReport, graph: ArchitectureGraph): void {
+  const risks = report.risks
+    .filter((risk) => risk.evidenceIds.length > 0)
+    .slice()
+    .sort((left, right) => severityRank(right.severity) - severityRank(left.severity));
+  const gaps = report.testing.evidenceIds.length > 0 ? report.testing.gaps : [];
+
+  doc.heading("Key findings", `${count(risks.length, "evidence-backed risk")}`);
+
+  if (risks.length === 0 && gaps.length === 0) {
+    doc.empty(
+      "No risk or testing gap carried a grounded citation. The sections below list what the analysis did establish.",
+    );
+    return;
+  }
+
+  if (risks.length > 0) {
+    doc.subheading("Risks, most severe first");
+    for (const risk of capped(risks, 8)) {
+      doc.row(`[${clean(risk.severity).toUpperCase()}] ${line(risk.title)}`, risk.evidenceIds.join(", "));
+    }
+  }
+
+  if (gaps.length > 0) {
+    doc.spacer(8);
+    doc.subheading("Testing gaps");
+    for (const gap of capped(gaps, 8)) doc.bullet(line(gap));
+    doc.evidence(report.testing.evidenceIds);
+  }
+
+  doc.spacer(8);
+  doc.paragraph(
+    `The architecture graph derived from these claims has ${count(graph.summary.nodeCount, "node")} and ${count(graph.summary.edgeCount, "relationship")}. Each finding above is stated in full, with its evidence, in the sections that follow.`,
+    { size: 8.5, color: MUTED },
+  );
+}
+
+function severityRank(severity: string): number {
+  const order = ["low", "medium", "high", "critical"];
+  const index = order.indexOf(severity.toLowerCase());
+  return index < 0 ? 0 : index;
 }
 
 function writeComponents(doc: Doc, report: AnalysisReport): void {
@@ -281,7 +418,14 @@ function writeRisks(doc: Doc, report: AnalysisReport): void {
   }
 }
 
-function writeArchitecture(doc: Doc, graph: ArchitectureGraph): void {
+/** Above this the diagram is skipped: see `writeArchitectureVisualization`. */
+const MAX_DIAGRAM_NODES = 28;
+const MAX_DIAGRAM_EDGES = 60;
+
+function writeArchitectureVisualization(doc: Doc, graph: ArchitectureGraph): void {
+  // The heading is Iteration 4's, deliberately. The section gained a drawn figure, but
+  // it is the same section about the same graph, and renaming it would have broken a
+  // test whose only job is to notice when the document loses the architecture.
   doc.heading("Architecture graph", `${graph.summary.nodeCount} nodes, ${graph.summary.edgeCount} edges`);
   if (graph.nodes.length === 0) {
     doc.empty("No node in the graph carried a grounded citation.");
@@ -294,6 +438,22 @@ function writeArchitecture(doc: Doc, graph: ArchitectureGraph): void {
   );
   doc.spacer(8);
 
+  const drawable = graph.nodes.length <= MAX_DIAGRAM_NODES && graph.edges.length <= MAX_DIAGRAM_EDGES;
+  if (drawable) {
+    doc.diagram(graph);
+  } else {
+    // Degradation, stated rather than silent. Thirty boxes on a Letter page is
+    // 40pt of width each, which is not a diagram — it is a wall the reader has to
+    // take on faith. The listing below is the same information, legibly.
+    doc.spacer(2);
+    doc.paragraph(
+      `This graph is too large to draw legibly on one page (${graph.nodes.length} nodes, ${graph.edges.length} edges; the diagram is drawn up to ${MAX_DIAGRAM_NODES} nodes and ${MAX_DIAGRAM_EDGES} edges). The full structure is listed below, and the dashboard draws it interactively.`,
+      { size: 8.5, color: WARN },
+    );
+    doc.spacer(6);
+  }
+
+  doc.subheading("Nodes");
   // Nodes arrive grouped by type already: `buildArchitectureGraph` sorts them by the
   // declared type order, so a change of type is a group boundary.
   let currentType = "";
@@ -338,7 +498,7 @@ function writeReading(doc: Doc, report: AnalysisReport): void {
   }
 }
 
-function writeQuestions(doc: Doc, questions: readonly AnsweredQuestion[]): void {
+function writeQuestions(doc: Doc, questions: readonly AnsweredQuestionView[]): void {
   if (questions.length === 0) return;
   const supported = questions.filter((question) => question.supported).length;
   doc.heading("Questions", `${supported} of ${questions.length} answered from verified evidence`);
@@ -364,6 +524,56 @@ function writeQuestions(doc: Doc, questions: readonly AnsweredQuestion[]): void 
       }
     }
     doc.spacer(8);
+  }
+}
+
+/**
+ * The index: every evidence id, what it points at, and what cites it.
+ *
+ * Distinct from Appendix A, which prints the excerpts. This is the lookup table — a
+ * reader who sees `ev-014` beside a claim on page four should not have to read four
+ * pages of excerpts to find out what it was. Nodes and edges are included because
+ * §7's promise is that a graph element names its evidence, and a printed graph has to
+ * keep it.
+ */
+function writeEvidenceReferences(doc: Doc, report: AnalysisReport, graph: ArchitectureGraph): void {
+  doc.heading("Evidence references", count(report.evidence.length, "citation"));
+  if (report.evidence.length === 0) {
+    doc.empty("Nothing survived grounding, so there is nothing to index.");
+    return;
+  }
+
+  const graphUse = new Map<string, string[]>();
+  const note = (ids: readonly string[], label: string): void => {
+    for (const id of ids) {
+      const existing = graphUse.get(id);
+      if (existing === undefined) graphUse.set(id, [label]);
+      else if (existing.length < 4 && !existing.includes(label)) existing.push(label);
+    }
+  };
+  for (const node of graph.nodes) note(node.evidenceIds, `node ${clean(node.label)}`);
+  for (const edge of graph.edges) note(edge.evidenceIds, `edge ${edge.relationship}`);
+
+  doc.paragraph(
+    "Each row is one citation, the artefact it names, and what in this document rests on it. Excerpts are in Appendix A.",
+    { size: 8.5, color: MUTED },
+  );
+  doc.spacer(6);
+
+  for (const item of capped(report.evidence, MAX_LIST_ROWS)) {
+    const uses = [...item.claimIds, ...(graphUse.get(item.id) ?? [])];
+    doc.row(`${item.id}  ${line(item.source)}${item.location === undefined ? "" : `  ${line(item.location)}`}`, item.type);
+    if (uses.length > 0) {
+      doc.paragraph(`cited by ${uses.slice(0, 8).join(", ")}`, { indent: 24, size: 7.5, color: MUTED });
+    }
+  }
+  const overflow = report.evidence.length - Math.min(report.evidence.length, MAX_LIST_ROWS);
+  if (overflow > 0) {
+    doc.spacer(4);
+    doc.paragraph(`… and ${count(overflow, "further citation")}, listed in Appendix A.`, {
+      size: 8.5,
+      color: MUTED,
+    });
   }
 }
 
@@ -650,6 +860,118 @@ class Doc {
     this.y += 16;
   }
 
+  /**
+   * Draws the architecture graph as boxes and wires.
+   *
+   * Layered by node type, in the graph's own declared type order, so a reader gets
+   * applications above packages above modules rather than an arbitrary arrangement.
+   * Within a band the nodes are spread evenly and wrapped onto further rows when the
+   * band is wider than the page.
+   *
+   * **Nothing here can overlap text, by construction.** The whole figure is measured
+   * first, the page is broken if it will not fit, and then it is painted in three
+   * passes: wires, then filled boxes, then labels. PDF content streams paint in
+   * document order, so a wire passing under a box is covered by the box, and a label
+   * is always the last thing drawn in its own rectangle. Layout never consults the
+   * text it is placing, so a long label is truncated to its box rather than allowed
+   * to decide the geometry.
+   */
+  diagram(graph: ArchitectureGraph): void {
+    const bands = groupByType(graph.nodes);
+    const columns = Math.max(1, Math.min(4, Math.ceil(Math.sqrt(graph.nodes.length))));
+    const gapX = 12;
+    const gapY = 14;
+    const boxWidth = (CONTENT_WIDTH - gapX * (columns - 1)) / columns;
+    const boxHeight = 34;
+
+    // Pass 0: geometry. Every box's rectangle is known before a byte is drawn.
+    const placed = new Map<string, { x: number; y: number; width: number; height: number }>();
+    let cursor = 0;
+    const rows: { label: string; height: number }[] = [];
+    for (const band of bands) {
+      const bandRows = Math.ceil(band.nodes.length / columns);
+      rows.push({ label: band.type, height: 12 + bandRows * (boxHeight + gapY) });
+      for (const [index, node] of band.nodes.entries()) {
+        const column = index % columns;
+        const row = Math.floor(index / columns);
+        placed.set(node.id, {
+          x: MARGIN_X + column * (boxWidth + gapX),
+          y: cursor + 12 + row * (boxHeight + gapY),
+          width: boxWidth,
+          height: boxHeight,
+        });
+      }
+      cursor += 12 + bandRows * (boxHeight + gapY);
+    }
+    const figureHeight = cursor;
+
+    // A figure taller than a page cannot be broken without cutting a box in half,
+    // so it gets its own page and the listing below carries the overflow.
+    if (figureHeight > CONTENT_BOTTOM - CONTENT_TOP) {
+      this.paragraph("The diagram does not fit one page; the listing below is complete.", {
+        size: 8.5,
+        color: WARN,
+      });
+      return;
+    }
+    this.ensure(figureHeight + 8);
+    const top = this.y;
+
+    // Pass 1: wires, first so every box paints over them.
+    for (const edge of graph.edges) {
+      const from = placed.get(edge.from);
+      const to = placed.get(edge.to);
+      if (from === undefined || to === undefined || from === to) continue;
+      this.pdf.line(
+        from.x + from.width / 2,
+        top + from.y + from.height / 2,
+        to.x + to.width / 2,
+        top + to.y + to.height / 2,
+        WIRE,
+      );
+    }
+
+    // Pass 2: band labels and box fills.
+    let bandTop = 0;
+    for (const band of rows) {
+      this.pdf.text(MARGIN_X, top + bandTop, spaced(band.label.replace(/-/g, " ").toUpperCase()), {
+        size: 6.5,
+        font: "bold",
+        color: MUTED,
+      });
+      bandTop += band.height;
+    }
+    for (const box of placed.values()) {
+      this.pdf.rect(box.x, top + box.y, box.width, box.height, BOX_FILL);
+      this.pdf.rule(box.x, top + box.y, box.width, 0.6, BOX_EDGE);
+    }
+
+    // Pass 3: labels, last, clipped to their own box by construction — two lines of
+    // wrapped text plus one of evidence ids, each measured against the box width.
+    for (const band of bands) {
+      for (const node of band.nodes) {
+        const box = placed.get(node.id);
+        if (box === undefined) continue;
+        const inner = box.width - 10;
+        const label = PdfWriter.wrap(clean(node.label), "bold", 7.5, inner).slice(0, 2);
+        let textY = top + box.y + 6;
+        for (const part of label) {
+          this.pdf.text(box.x + 5, textY, part, { size: 7.5, font: "bold", color: INK });
+          textY += 9.5;
+        }
+        const ids = PdfWriter.wrap(node.evidenceIds.join(" "), "mono", 6, inner)[0] ?? "";
+        this.pdf.text(box.x + 5, top + box.y + box.height - 9, ids, { size: 6, font: "mono", color: ACCENT });
+      }
+    }
+
+    this.y = top + figureHeight + 4;
+    this.paragraph(
+      `${count(graph.nodes.length, "node")} drawn, grouped by type; ${count(graph.edges.length, "relationship")} drawn as connecting lines. Each box shows the citations that established it.`,
+      { size: 7.5, color: MUTED },
+    );
+    this.spacer(6);
+  }
+
   empty(value: string): void {
     this.paragraph(value, { size: 9, color: MUTED });
   }
@@ -732,6 +1054,24 @@ function spaced(value: string): string {
 
 function capped<T>(items: readonly T[], max = MAX_LIST_ROWS): T[] {
   return items.length <= max ? [...items] : items.slice(0, max);
+}
+
+/**
+ * Splits nodes into contiguous bands of one type.
+ *
+ * `buildArchitectureGraph` already sorts by the declared type order, so this is a
+ * single pass over the sorted list rather than a grouping — which matters: it means
+ * the diagram's band order is the graph's own order, not a second opinion about
+ * which node type belongs on top.
+ */
+function groupByType(nodes: readonly ArchitectureNode[]): { type: string; nodes: ArchitectureNode[] }[] {
+  const bands: { type: string; nodes: ArchitectureNode[] }[] = [];
+  for (const node of nodes) {
+    const last = bands.at(-1);
+    if (last !== undefined && last.type === node.type) last.nodes.push(node);
+    else bands.push({ type: node.type, nodes: [node] });
+  }
+  return bands;
 }
 
 function count(value: number, singular: string, plural?: string): string {

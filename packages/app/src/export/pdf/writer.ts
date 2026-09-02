@@ -23,6 +23,10 @@
  *
  * The writer knows nothing about reports. Layout — what goes where, when to break a
  * page — belongs to the exporter that drives it.
+ *
+ * Its whole vocabulary is text, a filled rectangle, a straight line, and a page break.
+ * Iteration 5 added the line, for the architecture diagram's connectors; everything
+ * else the diagram needs it already had.
  */
 
 export type PdfFont = "regular" | "bold" | "mono";
@@ -105,9 +109,30 @@ export class PdfWriter {
     );
   }
 
-  /** A horizontal rule, the only line this report needs. */
+  /** A horizontal rule. A filled rectangle, because it is always axis-aligned. */
   rule(x: number, y: number, width: number, thickness = 0.5, color: readonly [number, number, number] = [0.8, 0.8, 0.8]): void {
     this.rect(x, y, width, thickness, color);
+  }
+
+  /**
+   * A straight line between two points, for the architecture diagram's connectors.
+   *
+   * The only stroked path in the writer — everything else is a filled rectangle. It
+   * is a `S`troke rather than a thin `re`ctangle because a diagonal rectangle would
+   * need a transformation matrix, and one `l`ineto is less machinery than that.
+   *
+   * `y` is measured from the top, like `text` and `rect`, so a caller never has to
+   * know that PDF's origin is bottom-left.
+   */
+  line(x1: number, y1: number, x2: number, y2: number, color: readonly [number, number, number], thickness = 0.6): void {
+    const [r, g, b] = color;
+    this.current().push(
+      `${format(r)} ${format(g)} ${format(b)} RG`,
+      `${format(thickness)} w`,
+      `${format(x1)} ${format(this.pageHeight - y1)} m`,
+      `${format(x2)} ${format(this.pageHeight - y2)} l`,
+      "S",
+    );
   }
 
   /** Advance width of `value` in points. */

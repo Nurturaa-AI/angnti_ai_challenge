@@ -37,6 +37,18 @@ export class SchemaError extends RepoArchaeologistError {
 export class EvaluationError extends RepoArchaeologistError {}
 
 /**
+ * The durable store cannot be opened, read or written.
+ *
+ * Its own category because the *response* to it differs from every other error:
+ * a `RequestError` means the caller should change the request, a `ConfigError`
+ * means the operator should change the setup, but a `StorageError` usually means
+ * the process should refuse to start rather than serve an analysis it cannot
+ * remember. It carries no filesystem detail in `message` — the path goes in the
+ * `hint`, which the CLI prints and the HTTP layer does not.
+ */
+export class StorageError extends RepoArchaeologistError {}
+
+/**
  * A request from outside the process is malformed or names something absent.
  *
  * Distinct from `ConfigError`, which is the *operator* having set something up

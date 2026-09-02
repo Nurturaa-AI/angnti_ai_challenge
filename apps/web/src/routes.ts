@@ -2,26 +2,23 @@ import { readdirSync } from "node:fs";
 import path from "node:path";
 import {
   ANALYSIS_SYSTEMS,
+  AnalysisEventBus,
+  AnalysisRunner,
   DEFAULT_ANALYSIS_SYSTEM,
   DEFAULT_QUESTION_BUDGET,
-  InMemoryAnalysisStore,
   MAX_QUESTION_CHARS,
   ObservabilityRecorder,
   PdfReportExporter,
-  analyzeRepository,
   answerQuestion,
-  buildAnalysisReport,
-  buildArchitectureGraph,
+  isTerminal,
+  mergeQuestionEvidence,
+  questionView,
   resolveRepositoryRequest,
   systemSupportsFocus,
-  type AnalysisReport,
+  toContextSources,
+  type AnalysisRecord,
   type AnalysisStore,
-  type AnsweredQuestion,
-  type ArchitectureGraph,
-  type QuestionCitation,
-  type ReportEvidence,
   type ReportExporter,
-  type StoredAnalysis,
 } from "@repo-arch/app";
 import {
   IGNORED_DIRECTORIES,
@@ -29,35 +26,43 @@ import {
   createLlmClient,
   statOrNull,
   type AnalysisConfig,
-  type ContextSourceText,
   type ExplorationBudget,
   type LlmClient,
   type PrecisionPolicy,
 } from "@repo-arch/shared";
 import { z } from "zod";
 import { jsonResponse, type ApiHandler, type ApiRequest, type ApiResponse } from "./api";
+import { analysisDetailDto, analysisSummaryDto, evidenceViewDto, findCitation } from "./dto";
 
 /**
  * The API.
  *
- * Eight routes, hand-dispatched. A router dependency would be more code than this and
- * would still need every one of the checks below, which are the parts that matter:
+ * Hand-dispatched. A router dependency would be more code than this and would still
+ * need every one of the checks below, which are the parts that matter:
  *
  *   - a request body is parsed by a schema before anything reads a field from it,
  *   - a repository path crosses `resolveRepositoryRequest` before anything opens it,
  *   - an analysis id is looked up rather than trusted,
- *   - nothing in a response is assembled from a path the caller supplied.
+ *   - every evidence lookup carries the analysis id as well as the evidence id,
+ *   - nothing in a response is assembled from a path the caller supplied,
+ *   - every response body is built by a named DTO function in `dto.ts`.
  *
  * The routes orchestrate; they contain no analysis logic. Everything they call lives in
  * `@repo-arch/app`, which is the same code the CLI runs.
+ *
+ * **Route naming.** Iteration 5 canonicalises on the plural, resource-shaped forms —
+ * `/api/analyses`, `/api/analyses/:id`, `/api/analyses/:id/questions`. Iteration 4's
+ * singular `/api/analysis/:id`, `/api/analyze` and `/api/questions` are kept as
+ * permanent aliases rather than removed. That is not indecision: those forms are what
+ * Iteration 4's forty-five API tests exercise, and keeping them passing *unmodified* is
+ * the strongest available evidence that this iteration changed the product's shape
+ * without changing its behaviour.
  */
 
-/** The largest text the source viewer will return for one artefact. */
-const MAX_SOURCE_TEXT_CHARS = 60_000;
-/** Above this, the whitespace-tolerant excerpt search is skipped. */
-const MAX_EXCERPT_SEARCH_CHARS = 200_000;
 /** Entries returned by the repository picker. */
 const MAX_REPOSITORY_ENTRIES = 200;
+/** How often an idle event stream writes a keep-alive comment. */
+const STREAM_HEARTBEAT_MS = 15_000;
 
 export interface ApiDependencies {
   /** Absolute path. Every repository a request may name lives inside it. */
@@ -65,21 +70,33 @@ export interface ApiDependencies {
   config: AnalysisConfig;
   budget: ExplorationBudget;
   precisionPolicy: PrecisionPolicy;
-  /** Defaults to a fresh bounded in-memory store. */
-  store?: AnalysisStore | undefined;
+  /** The durable store. Required: there is no in-memory fallback any more. */
+  store: AnalysisStore;
   /** Defaults to a client built from `config`; injected by tests. */
   client?: LlmClient | undefined;
   exporter?: ReportExporter | undefined;
   metrics?: ObservabilityRecorder | undefined;
+  events?: AnalysisEventBus | undefined;
   /** Bounds a question's own exploration. Separate from the analysis budget. */
   questionBudget?: ExplorationBudget | undefined;
   now?: (() => Date) | undefined;
+  /** Where an unexpected failure is reported in full. Defaults to stderr. */
+  logError?: ((message: string) => void) | undefined;
 }
 
 export interface WebApi {
   handle: ApiHandler;
   store: AnalysisStore;
   metrics: ObservabilityRecorder;
+  events: AnalysisEventBus;
+  /**
+   * Resolves when every analysis started through this API has finished.
+   *
+   * Tests and a graceful shutdown both need it: an analysis now outlives the
+   * request that started it, so "the response arrived" no longer means "the work
+   * is done" and something has to be able to wait.
+   */
+  idle: () => Promise<void>;
 }
 
 const AnalyzeRequestSchema = z.strictObject({
@@ -90,31 +107,100 @@ const AnalyzeRequestSchema = z.strictObject({
   focus: z.string().min(1).max(500).optional(),
 });
 
+/** The legacy body, which names the analysis inside the body rather than the path. */
 const QuestionRequestSchema = z.strictObject({
   analysisId: z.string().min(1).max(200),
   question: z.string().min(1).max(MAX_QUESTION_CHARS),
 });
 
+/** The canonical body: the analysis is in the path, so it is not in the body. */
+const ScopedQuestionRequestSchema = z.strictObject({
+  question: z.string().min(1).max(MAX_QUESTION_CHARS),
+});
+
+/**
+ * What an analysis id may look like.
+ *
+ * Checked before the store sees it, so a malformed id is a 400 with a stable
+ * message rather than a query that happens to return nothing. The store is
+ * parameterised and would be safe either way; this is about giving the caller an
+ * answer that distinguishes "you sent nonsense" from "that analysis is gone".
+ */
+const ANALYSIS_ID_PATTERN = /^[A-Za-z0-9._-]{1,200}$/;
+
 export function createApi(dependencies: ApiDependencies): WebApi {
-  const store = dependencies.store ?? new InMemoryAnalysisStore();
+  const store = dependencies.store;
   const metrics = dependencies.metrics ?? new ObservabilityRecorder();
+  const events = dependencies.events ?? new AnalysisEventBus();
   const exporter = dependencies.exporter ?? new PdfReportExporter({ now: dependencies.now });
   const now = dependencies.now ?? ((): Date => new Date());
   const client = dependencies.client ?? createLlmClient(dependencies.config);
   const questionBudget = dependencies.questionBudget ?? DEFAULT_QUESTION_BUDGET;
   const questionQueue = new KeyedQueue();
+  const inFlight = new Set<Promise<unknown>>();
 
-  const requireAnalysis = (id: string): StoredAnalysis => {
-    const stored = store.get(id);
-    if (!stored) {
-      throw new RequestError(`No analysis with id "${id}".`, "Analyses are held in memory and are lost when the server restarts.", {
-        notFound: true,
-      });
+  const runner = new AnalysisRunner({
+    store,
+    events,
+    workspaceRoot: dependencies.workspaceRoot,
+    config: dependencies.config,
+    client,
+    budget: dependencies.budget,
+    precisionPolicy: dependencies.precisionPolicy,
+    now: dependencies.now,
+    logError: dependencies.logError,
+  });
+
+  const requireId = (id: string): string => {
+    if (!ANALYSIS_ID_PATTERN.test(id)) {
+      throw new RequestError(
+        "That is not a valid analysis id.",
+        "An id looks like \"an-m1x2y3-1\". Ids come from the analysis list; they cannot be constructed.",
+      );
     }
-    return stored;
+    return id;
   };
 
-  const routeAnalyze = async (request: ApiRequest): Promise<ApiResponse> => {
+  const requireAnalysis = async (id: string): Promise<AnalysisRecord> => {
+    const record = await store.get(requireId(id));
+    if (record === undefined) {
+      throw new RequestError(
+        `No analysis with id "${id}".`,
+        "It may have been deleted. The analysis list shows what this workspace still holds.",
+        { notFound: true },
+      );
+    }
+    return record;
+  };
+
+  /** A record that has a report and a graph, or an error explaining why not. */
+  const requireCompleted = async (id: string): Promise<AnalysisRecord> => {
+    const record = await requireAnalysis(id);
+    if (record.status === "failed") {
+      throw new RequestError(
+        `Analysis "${id}" failed and has no report.`,
+        record.error ?? undefined,
+      );
+    }
+    if (record.report === null || record.graph === null) {
+      throw new RequestError(
+        `Analysis "${id}" is still ${record.status}.`,
+        "Wait for it to complete. Progress is on /api/analyses/:id/events.",
+      );
+    }
+    return record;
+  };
+
+  const track = <T>(work: Promise<T>): Promise<T> => {
+    inFlight.add(work);
+    void work.then(
+      () => inFlight.delete(work),
+      () => inFlight.delete(work),
+    );
+    return work;
+  };
+
+  const routeAnalyze = async (request: ApiRequest, wait: boolean): Promise<ApiResponse> => {
     const body = parseBody(AnalyzeRequestSchema, request.body);
     const system = body.system ?? DEFAULT_ANALYSIS_SYSTEM;
     if (!ANALYSIS_SYSTEMS.includes(system)) {
@@ -130,48 +216,38 @@ export function createApi(dependencies: ApiDependencies): WebApi {
       );
     }
 
-    // The one door: null bytes, absolute paths, `..`, symlink escapes and generated
-    // directories are all rejected here, before any of it reaches the pipeline.
-    const repository = resolveRepositoryRequest(dependencies.workspaceRoot, body.repository);
+    // Fail fast on a repository the workspace does not offer. The runner checks
+    // this again under `validating` — that is the authoritative check and the one
+    // a restored record depends on — but answering a bad path with a 400 now is
+    // more useful than a queued analysis that fails a moment later.
+    resolveRepositoryRequest(dependencies.workspaceRoot, body.repository);
 
-    const run = await analyzeRepository({
-      repositoryPath: portablePath(repository.absolute),
+    const started = await runner.start({
+      repository: body.repository,
       system,
-      config: dependencies.config,
-      budget: dependencies.budget,
-      precisionPolicy: dependencies.precisionPolicy,
-      client,
-      now: dependencies.now,
       focus: body.focus,
     });
+    const completion = track(started.completion);
 
-    // The client named this repository *inside the workspace*, so that is the name the
-    // report carries. `collectRepositoryContext` records a path relative to the server's
-    // own working directory, which is portable for a CLI run — the user typed it — but for
-    // a served workspace it describes a machine the client cannot see, and when the
-    // workspace sits outside the process tree `portablePath` cannot even keep it relative.
-    // `widget` is both more useful to a reader and less revealing than `/srv/repos/widget`.
-    const analysed = buildAnalysisReport(run);
-    const report: AnalysisReport = {
-      ...analysed,
-      repository: { ...analysed.repository, path: repository.relative === "" ? "." : repository.relative },
-    };
-    const graph = buildArchitectureGraph(report);
-    const stored: StoredAnalysis = {
-      id: report.id,
-      createdAt: report.finishedAt,
-      report,
-      graph,
-      record: run.record,
-      sources: run.sources,
-      repositoryRoot: run.repositoryRoot,
-      questions: [],
-    };
-    store.save(stored);
+    if (!wait) {
+      // 202: the record exists and is durable; the work has not finished.
+      return jsonResponse(analysisDetailDto(started.record), 202);
+    }
 
+    const finished = await completion;
+    if (finished.status === "failed") {
+      throw new RequestError(finished.error ?? "The analysis failed.");
+    }
+    recordAnalysisMetrics(finished);
+    return jsonResponse(analysisDetailDto(finished), 201);
+  };
+
+  const recordAnalysisMetrics = (record: AnalysisRecord): void => {
+    if (record.report === null || record.graph === null) return;
+    const report = record.report;
     metrics.analysisCompleted(
       {
-        analysisId: report.id,
+        analysisId: record.id,
         system: report.system,
         model: report.model,
         durationMs: report.metrics.durationMs,
@@ -181,64 +257,80 @@ export function createApi(dependencies: ApiDependencies): WebApi {
         citationsGrounded: report.metrics.citationsGrounded,
         citationsDropped: report.metrics.citationsDropped,
         unsupportedClaims: report.metrics.unsupportedClaims,
-        nodeCount: graph.summary.nodeCount,
-        edgeCount: graph.summary.edgeCount,
+        nodeCount: record.graph.summary.nodeCount,
+        edgeCount: record.graph.summary.edgeCount,
       },
       now(),
     );
-
-    return jsonResponse(publicAnalysis(stored), 201);
   };
 
-  const routeQuestion = async (request: ApiRequest): Promise<ApiResponse> => {
-    const body = parseBody(QuestionRequestSchema, request.body);
-    // Serialised per analysis: two questions answered concurrently would both read the
-    // history, and the later one would overwrite the earlier one's place in it.
-    return await questionQueue.run(body.analysisId, async () => {
-      const stored = requireAnalysis(body.analysisId);
-      const questionNumber = stored.questions.length + 1;
+  const routeQuestion = async (analysisId: string, question: string): Promise<ApiResponse> => {
+    // Serialised per analysis: two questions answered concurrently would both read
+    // the history, and the later one would overwrite the earlier one's place in it.
+    return await questionQueue.run(analysisId, async () => {
+      const record = await requireCompleted(analysisId);
+      const report = record.report;
+      if (report === null) throw new RequestError(`Analysis "${analysisId}" has no report.`);
+      const questionNumber = record.questions.length + 1;
+
+      // The stored relative path back through the same boundary. A question asked
+      // after a restart resolves its root exactly the way the analysis did, and
+      // there is no absolute path anywhere in between for anyone to tamper with.
+      const repository = resolveRepositoryRequest(
+        dependencies.workspaceRoot,
+        record.repositoryPath,
+      );
 
       const run = await answerQuestion({
-        question: body.question,
+        question,
         questionId: `q-${questionNumber}`,
-        repositoryRoot: stored.repositoryRoot,
-        repositoryName: stored.report.repository.name,
-        sources: stored.sources,
-        history: stored.questions,
+        repositoryRoot: repository.absolute,
+        repositoryName: report.repository.name,
+        // The redacted projection, which is also what a question asked after a
+        // restart would see. One behaviour, not two.
+        sources: toContextSources(record.evidence),
+        history: record.questions,
         client,
         budget: questionBudget,
         now: dependencies.now,
       });
 
-      // The question's own reads join the ledger so the source viewer can show them.
-      // They do not become citable by a later question: `answerQuestion` seeds each
-      // question's ledger from reconnaissance artefacts only.
-      stored.sources.push(...run.newSources);
-      stored.questions.push(run.answered);
-      store.save(stored);
+      const answered = questionView(run.answered);
+      await store.appendQuestion(record.id, answered);
+
+      // The question's own reads join the stored evidence, so the viewer can serve
+      // the artefacts its citations name. They do not become citable by a later
+      // question: `answerQuestion` seeds each question's ledger from reconnaissance
+      // artefacts only, which is what keeps a conversation from becoming evidence.
+      const merged = await store.get(record.id);
+      if (merged !== undefined) {
+        await store.update(record.id, {
+          evidence: mergeQuestionEvidence(merged.evidence, run.newSources, answered),
+        });
+      }
 
       metrics.questionAnswered(
         {
-          analysisId: stored.id,
+          analysisId: record.id,
           questionNumber,
-          durationMs: run.answered.metrics.durationMs,
-          toolCalls: run.answered.metrics.toolCalls,
-          scoutFilesRead: run.answered.metrics.scoutFilesRead,
-          citationsClaimed: run.answered.audit.claimed,
-          citationsGrounded: run.answered.audit.grounded,
-          supported: run.answered.supported,
+          durationMs: answered.metrics.durationMs,
+          toolCalls: answered.metrics.toolCalls,
+          scoutFilesRead: answered.metrics.scoutFilesRead,
+          citationsClaimed: answered.audit.claimed,
+          citationsGrounded: answered.audit.grounded,
+          supported: answered.supported,
           followUp: questionNumber > 1,
         },
         now(),
       );
 
-      return jsonResponse({ analysisId: stored.id, question: run.answered }, 201);
+      return jsonResponse({ analysisId: record.id, question: answered }, 201);
     });
   };
 
-  const routeEvidence = (analysisId: string, evidenceId: string): ApiResponse => {
-    const stored = requireAnalysis(analysisId);
-    const found = findCitation(stored, evidenceId);
+  const routeEvidence = async (analysisId: string, evidenceId: string): Promise<ApiResponse> => {
+    const record = await requireAnalysis(analysisId);
+    const found = findCitation(record, evidenceId);
     if (!found) {
       throw new RequestError(
         `Analysis "${analysisId}" issued no evidence with id "${evidenceId}".`,
@@ -246,11 +338,21 @@ export function createApi(dependencies: ApiDependencies): WebApi {
         { notFound: true },
       );
     }
-    return jsonResponse(evidenceView(stored, found.citation, found.origin));
+    // Both ids, always. An evidence id from another analysis reaches a query that
+    // is scoped to this one and finds nothing.
+    const source =
+      found.citation.sourceId === null
+        ? undefined
+        : await store.getEvidenceSource(record.id, found.citation.sourceId);
+    const reportSource = record.report?.sources.find((item) => item.id === found.citation.sourceId);
+    return jsonResponse(evidenceViewDto(record.id, found.citation, found.origin, source, reportSource));
   };
 
   const routeExport = async (analysisId: string, format: string): Promise<ApiResponse> => {
-    const stored = requireAnalysis(analysisId);
+    const record = await requireCompleted(analysisId);
+    if (record.report === null || record.graph === null) {
+      throw new RequestError(`Analysis "${analysisId}" has no report to export.`);
+    }
     if (format !== exporter.format) {
       throw new RequestError(`No exporter for format "${format}".`, `Available: ${exporter.format}.`, {
         notFound: true,
@@ -258,13 +360,17 @@ export function createApi(dependencies: ApiDependencies): WebApi {
     }
     const startedAt = Date.now();
     const bytes = await exporter.export({
-      report: stored.report,
-      graph: stored.graph,
-      questions: stored.questions,
+      report: record.report,
+      graph: record.graph,
+      questions: record.questions,
+      repositoryPath: record.repositoryPath === "" ? "." : record.repositoryPath,
+      analysisId: record.id,
+      createdAt: record.createdAt,
+      durationMs: record.metadata.durationMs,
     });
     metrics.exportGenerated(
       {
-        analysisId: stored.id,
+        analysisId: record.id,
         format: exporter.format,
         bytes: bytes.length,
         durationMs: Date.now() - startedAt,
@@ -276,7 +382,76 @@ export function createApi(dependencies: ApiDependencies): WebApi {
       status: 200,
       contentType: exporter.contentType,
       bytes,
-      filename: exporter.filename(stored.report),
+      filename: exporter.filename(record.report),
+    };
+  };
+
+  const routeDelete = async (analysisId: string): Promise<ApiResponse> => {
+    const id = requireId(analysisId);
+    const removed = await store.delete(id);
+    if (!removed) {
+      throw new RequestError(`No analysis with id "${id}".`, undefined, { notFound: true });
+    }
+    // Progress for an id that no longer exists is not progress. Forgetting it also
+    // closes the door on a subscriber holding a stream open for a deleted analysis.
+    events.forget(id);
+    return jsonResponse({ deleted: id }, 200);
+  };
+
+  /**
+   * The progress stream.
+   *
+   * Replay first, then live: the bus hands a new subscriber everything it has
+   * already emitted for this analysis, so a browser that posts and then connects
+   * sees the same sequence as one that was already listening. The stream closes
+   * itself once a terminal event has been delivered, which means the browser never
+   * has to decide when to stop waiting.
+   */
+  const routeEvents = async (analysisId: string): Promise<ApiResponse> => {
+    const record = await requireAnalysis(analysisId);
+
+    return {
+      kind: "stream",
+      status: 200,
+      contentType: "text/event-stream",
+      open: (channel) => {
+        let closed = false;
+        const finish = (): void => {
+          if (closed) return;
+          closed = true;
+          channel.close();
+        };
+
+        const unsubscribe = events.subscribe(record.id, (event) => {
+          if (closed) return;
+          channel.send(event.type, event);
+          if (event.type === "analysis.completed" || event.type === "analysis.failed") finish();
+        });
+
+        // A record that reached a terminal state before this connection opened, and
+        // whose events the bus has since evicted, still has to end the stream.
+        if (!closed && isTerminal(record.status) && events.replay(record.id).length === 0) {
+          channel.send(
+            record.status === "completed" ? "analysis.completed" : "analysis.failed",
+            record.status === "completed"
+              ? { type: "analysis.completed", analysisId: record.id, at: record.updatedAt, durationMs: record.metadata.durationMs ?? 0 }
+              : { type: "analysis.failed", analysisId: record.id, at: record.updatedAt, error: record.error ?? "The analysis failed." },
+          );
+          finish();
+        }
+
+        const heartbeat = setInterval(() => {
+          if (!closed) channel.comment("keep-alive");
+        }, STREAM_HEARTBEAT_MS);
+        // Never the reason a process stays alive.
+        heartbeat.unref?.();
+
+        return () => {
+          closed = true;
+          clearInterval(heartbeat);
+          unsubscribe();
+        };
+      },
     };
   };
 
@@ -284,7 +459,7 @@ export function createApi(dependencies: ApiDependencies): WebApi {
     try {
       return await dispatch(request);
     } catch (error) {
-      return errorResponse(error);
+      return errorResponse(error, dependencies.logError);
     }
   };
 
@@ -304,6 +479,8 @@ export function createApi(dependencies: ApiDependencies): WebApi {
         systems: ANALYSIS_SYSTEMS,
         maxQuestionChars: MAX_QUESTION_CHARS,
         exportFormats: [exporter.format],
+        /** Durable now. The browser says so in the sidebar. */
+        durableAnalyses: true,
       });
     }
 
@@ -312,19 +489,58 @@ export function createApi(dependencies: ApiDependencies): WebApi {
       return jsonResponse({ repositories: listRepositories(dependencies.workspaceRoot) });
     }
 
-    if (resource === "analyses" && rest.length === 0) {
-      requireMethod(request, "GET");
-      return jsonResponse({ analyses: store.list() });
+    // ---- canonical: /api/analyses ----
+    if (resource === "analyses") {
+      if (rest.length === 0) {
+        if (request.method === "POST") return await routeAnalyze(request, false);
+        requireMethod(request, "GET");
+        const summaries = await store.list();
+        return jsonResponse({ analyses: summaries.map(analysisSummaryDto) });
+      }
+
+      const id = rest[0];
+      if (id === undefined) throw notFound(request);
+
+      if (rest.length === 1) {
+        if (request.method === "DELETE") return await routeDelete(id);
+        requireMethod(request, "GET");
+        return jsonResponse(analysisDetailDto(await requireAnalysis(id)));
+      }
+      if (rest.length === 2 && rest[1] === "events") {
+        requireMethod(request, "GET");
+        return await routeEvents(id);
+      }
+      if (rest.length === 2 && rest[1] === "questions") {
+        if (request.method === "POST") {
+          const body = parseBody(ScopedQuestionRequestSchema, request.body);
+          return await routeQuestion(id, body.question);
+        }
+        requireMethod(request, "GET");
+        const record = await requireAnalysis(id);
+        return jsonResponse({ analysisId: record.id, questions: record.questions });
+      }
+      if (rest.length === 3 && rest[1] === "evidence") {
+        requireMethod(request, "GET");
+        return await routeEvidence(id, rest[2] as string);
+      }
+      if (rest.length === 3 && rest[1] === "export") {
+        requireMethod(request, "GET");
+        return await routeExport(id, rest[2] as string);
+      }
+      throw notFound(request);
     }
 
+    // ---- Iteration 4 aliases, kept so its tests keep passing unmodified ----
     if (resource === "analyze" && rest.length === 0) {
       requireMethod(request, "POST");
-      return await routeAnalyze(request);
+      // The legacy contract is synchronous: it returns the finished analysis.
+      return await routeAnalyze(request, true);
     }
 
     if (resource === "questions" && rest.length === 0) {
       requireMethod(request, "POST");
-      return await routeQuestion(request);
+      const body = parseBody(QuestionRequestSchema, request.body);
+      return await routeQuestion(body.analysisId, body.question);
     }
 
     if (resource === "analysis") {
@@ -332,12 +548,13 @@ export function createApi(dependencies: ApiDependencies): WebApi {
       if (id === undefined) throw notFound(request);
 
       if (rest.length === 1) {
+        if (request.method === "DELETE") return await routeDelete(id);
         requireMethod(request, "GET");
-        return jsonResponse(publicAnalysis(requireAnalysis(id)));
+        return jsonResponse(analysisDetailDto(await requireAnalysis(id)));
       }
       if (rest.length === 3 && rest[1] === "evidence") {
         requireMethod(request, "GET");
-        return routeEvidence(id, rest[2] as string);
+        return await routeEvidence(id, rest[2] as string);
       }
       if (rest.length === 3 && rest[1] === "export") {
         requireMethod(request, "GET");
@@ -345,186 +562,55 @@ export function createApi(dependencies: ApiDependencies): WebApi {
       }
       if (rest.length === 2 && rest[1] === "questions") {
         requireMethod(request, "GET");
-        return jsonResponse({ questions: requireAnalysis(id).questions });
+        const record = await requireAnalysis(id);
+        return jsonResponse({ questions: record.questions });
+      }
+      if (rest.length === 2 && rest[1] === "events") {
+        requireMethod(request, "GET");
+        return await routeEvents(id);
       }
     }
 
     throw notFound(request);
   };
 
-  return { handle, store, metrics };
+  const idle = async (): Promise<void> => {
+    while (inFlight.size > 0) {
+      await Promise.allSettled([...inFlight]);
+    }
+  };
+
+  return { handle, store, metrics, events, idle };
 }
 
 // ---------------------------------------------------------------------------
-// Views
+// Helpers
 // ---------------------------------------------------------------------------
 
 /**
- * What a client is allowed to see of a stored analysis.
+ * Serialises work by key.
  *
- * Two things are deliberately absent. `repositoryRoot` is an absolute path on this
- * machine and belongs to the tool boundary, not to a browser. `sources[].text` is the
- * whole of every artefact — served one at a time by the evidence route, where a caller
- * has named the citation they want to check, rather than shipped in every dashboard
- * load.
+ * Two questions asked against one analysis at the same time would each read the history,
+ * answer against it, and append — and the second write would land on a snapshot taken
+ * before the first. Different analyses never contend.
  */
-function publicAnalysis(stored: StoredAnalysis): {
-  id: string;
-  createdAt: string;
-  report: AnalysisReport;
-  graph: ArchitectureGraph;
-  questions: AnsweredQuestion[];
-} {
-  return {
-    id: stored.id,
-    createdAt: stored.createdAt,
-    report: stored.report,
-    graph: stored.graph,
-    questions: stored.questions,
-  };
-}
+class KeyedQueue {
+  private readonly tails = new Map<string, Promise<unknown>>();
 
-/** A citation, wherever in the analysis it was issued. */
-interface FoundCitation {
-  citation: ReportEvidence | QuestionCitation;
-  origin: { kind: "report" } | { kind: "question"; questionId: string; question: string };
-}
-
-function findCitation(stored: StoredAnalysis, evidenceId: string): FoundCitation | undefined {
-  const fromReport = stored.report.evidence.find((item) => item.id === evidenceId);
-  if (fromReport) return { citation: fromReport, origin: { kind: "report" } };
-  for (const answered of stored.questions) {
-    const citation = answered.citations.find((item) => item.id === evidenceId);
-    if (citation) {
-      return {
-        citation,
-        origin: { kind: "question", questionId: answered.id, question: answered.question },
-      };
-    }
+  async run<T>(key: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.tails.get(key) ?? Promise.resolve();
+    const result = previous.then(work, work);
+    // Keep the chain alive on failure, and drop the key once it drains.
+    const tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.tails.set(key, tail);
+    void tail.then(() => {
+      if (this.tails.get(key) === tail) this.tails.delete(key);
+    });
+    return await result;
   }
-  return undefined;
-}
-
-/**
- * The source viewer's payload.
- *
- * The text comes from the evidence ledger, never from a fresh read of the file. That is
- * a correctness decision before it is a security one: the ledger holds what was actually
- * verified, and a file edited since the analysis would make a grounded citation look
- * fabricated. It is also the strongest possible form of "never bypass
- * `resolveInsideRepository`" — this path touches no filesystem at all.
- *
- * `lineNumbersKnown` is false for a truncated artefact. A partial `read_file` view
- * carries no record of which line it started at, so numbering its first line `1` would
- * be a fabrication. The model's own `location` is passed through, labelled as its claim
- * rather than as a fact.
- */
-function evidenceView(
-  stored: StoredAnalysis,
-  citation: ReportEvidence | QuestionCitation,
-  origin: FoundCitation["origin"],
-): unknown {
-  const source = citation.sourceId === null ? undefined : findSource(stored.sources, citation.sourceId);
-  const reportSource = stored.report.sources.find((item) => item.id === citation.sourceId);
-
-  if (!source) {
-    return {
-      analysisId: stored.id,
-      origin,
-      evidence: citation,
-      source: null,
-      note: "This citation names no artefact in the evidence ledger.",
-    };
-  }
-
-  const full = source.text;
-  const text = full.length > MAX_SOURCE_TEXT_CHARS ? full.slice(0, MAX_SOURCE_TEXT_CHARS) : full;
-  const located = citation.excerpt === undefined ? null : locateExcerpt(text, citation.excerpt);
-
-  return {
-    analysisId: stored.id,
-    origin,
-    evidence: citation,
-    source: {
-      id: source.id,
-      type: source.type,
-      bytes: source.bytes,
-      /** True when only part of the artefact reached the ledger. */
-      truncated: source.truncated,
-      origins: reportSource?.origins ?? [],
-      citationCount: reportSource?.citationCount ?? 0,
-      text,
-      textTruncatedForDisplay: full.length > text.length,
-      /** See the note above: a partial view has no line-number origin. */
-      lineNumbersKnown: !source.truncated,
-      /** The model's claim about where in the file this is. Not verified. */
-      reportedLocation: citation.location ?? null,
-      excerptMatch:
-        located === null
-          ? null
-          : {
-              start: located.start,
-              end: located.end,
-              line: source.truncated ? null : lineOf(text, located.start),
-            },
-    },
-  };
-}
-
-function findSource(sources: readonly ContextSourceText[], id: string): ContextSourceText | undefined {
-  return sources.find((source) => source.id === id);
-}
-
-function lineOf(text: string, index: number): number {
-  let line = 1;
-  for (let cursor = 0; cursor < index && cursor < text.length; cursor += 1) {
-    if (text[cursor] === "\n") line += 1;
-  }
-  return line;
-}
-
-/**
- * Finds a verified excerpt in its artefact so the viewer can highlight it.
- *
- * Grounding compares whitespace-collapsed, lowercased text, so an excerpt that passed
- * verification need not appear verbatim: a model may have normalised indentation or a
- * line break. An exact match is tried first, then a scan that tolerates any run of
- * whitespace wherever the excerpt has one. Returning `null` costs only a highlight.
- */
-function locateExcerpt(text: string, excerpt: string): { start: number; end: number } | null {
-  const direct = text.indexOf(excerpt);
-  if (direct >= 0) return { start: direct, end: direct + excerpt.length };
-  if (text.length > MAX_EXCERPT_SEARCH_CHARS) return null;
-
-  const needle = excerpt.replace(/\s+/g, " ").trim().toLowerCase();
-  if (needle === "") return null;
-
-  for (let start = 0; start < text.length; start += 1) {
-    if (isSpace(text[start])) continue;
-    let needleIndex = 0;
-    let cursor = start;
-    let end = start;
-    while (needleIndex < needle.length && cursor < text.length) {
-      const wanted = needle[needleIndex] as string;
-      const actual = (text[cursor] as string).toLowerCase();
-      if (wanted === " ") {
-        if (!isSpace(actual)) break;
-        while (cursor < text.length && isSpace(text[cursor])) cursor += 1;
-        needleIndex += 1;
-        continue;
-      }
-      if (isSpace(actual) || actual !== wanted) break;
-      cursor += 1;
-      needleIndex += 1;
-      end = cursor;
-    }
-    if (needleIndex === needle.length) return { start, end };
-  }
-  return null;
-}
-
-function isSpace(character: string | undefined): boolean {
-  return character !== undefined && /\s/.test(character);
 }
 
 /**
@@ -569,36 +655,6 @@ function listRepositories(workspaceRoot: string): {
   return entries;
 }
 
-// ---------------------------------------------------------------------------
-// Plumbing
-// ---------------------------------------------------------------------------
-
-/**
- * Serialises work by key.
- *
- * Two questions asked against one analysis at the same time would each read the history,
- * answer against it, and append — and the second write would land on a snapshot taken
- * before the first. Different analyses never contend.
- */
-class KeyedQueue {
-  private readonly tails = new Map<string, Promise<unknown>>();
-
-  async run<T>(key: string, work: () => Promise<T>): Promise<T> {
-    const previous = this.tails.get(key) ?? Promise.resolve();
-    const result = previous.then(work, work);
-    // Keep the chain alive on failure, and drop the key once it drains.
-    const tail = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    this.tails.set(key, tail);
-    void tail.then(() => {
-      if (this.tails.get(key) === tail) this.tails.delete(key);
-    });
-    return await result;
-  }
-}
-
 function parseBody<T>(schema: z.ZodType<T>, body: unknown): T {
   if (body === undefined) {
     throw new RequestError("A JSON request body is required.", "Send Content-Type: application/json.");
@@ -624,30 +680,20 @@ function notFound(request: ApiRequest): RequestError {
 }
 
 /**
- * A path for the run record: relative to the process, when that is possible.
- *
- * `RepositoryInfo.path` is kept relative so a report stays portable, and an absolute
- * host path in a shared briefing tells a reader where somebody's home directory is. A
- * workspace outside the process's own tree falls back to the absolute path, which is
- * still bounded — `resolveRepositoryRequest` has already established that the target is
- * inside the workspace the operator named.
- */
-function portablePath(absolute: string): string {
-  const relative = path.relative(process.cwd(), absolute);
-  if (relative === "") return ".";
-  if (relative.startsWith("..") || path.isAbsolute(relative)) return absolute;
-  return relative;
-}
-
-/**
  * Maps a thrown error onto a status.
  *
  * The categories are the ones the error hierarchy already draws, which is why it is
  * worth having: a `RequestError` is the caller's, a `ToolError` is a boundary refusing a
- * path, a `ModelError` is upstream, and anything unrecognised is ours and says so
- * without a stack trace or an internal message.
+ * path, a `ModelError` is upstream, and anything unrecognised is ours.
+ *
+ * The last branch is the one that changed in Iteration 5. It used to pass the
+ * exception's own `message` through as a hint, which for an unanticipated error is
+ * as likely to be `ENOENT: no such file or directory, open '/home/…'` as it is to
+ * be an explanation — an absolute host path in an HTTP response, reachable by
+ * anything that could provoke an unhandled throw. Now the message goes to the
+ * operator's log and the caller gets a sentence with nothing in it.
  */
-function errorResponse(error: unknown): ApiResponse {
+function errorResponse(error: unknown, logError?: ((message: string) => void) | undefined): ApiResponse {
   const shape = (status: number, name: string, message: string, hint?: string | undefined): ApiResponse =>
     jsonResponse({ error: { name, message, ...(hint === undefined ? {} : { hint }) } }, status);
 
@@ -663,12 +709,14 @@ function errorResponse(error: unknown): ApiResponse {
   if (isNamed(error, "ConfigError")) {
     return shape(500, error.name, error.message, hintOf(error));
   }
-  return shape(
-    500,
-    "InternalError",
-    "The request failed.",
-    error instanceof Error ? error.message : undefined,
-  );
+  if (isNamed(error, "StorageError")) {
+    // The message is ours and safe; the hint holds the database path and is not.
+    return shape(500, error.name, error.message);
+  }
+
+  const report = logError ?? ((message: string): void => console.error(message));
+  report(`unhandled API error: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
+  return shape(500, "InternalError", "The request failed.");
 }
 
 function isNamed(error: unknown, name: string): error is Error {

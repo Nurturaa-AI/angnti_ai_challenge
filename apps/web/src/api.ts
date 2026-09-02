@@ -26,7 +26,33 @@ export type ApiResponse =
       bytes: Uint8Array;
       /** Sets `Content-Disposition: attachment`. */
       filename?: string;
+    }
+  | {
+      kind: "stream";
+      status: number;
+      contentType: string;
+      /**
+       * Writes to the open response and returns a teardown for when it closes.
+       *
+       * A route stays a function from a plain object to a plain object right up
+       * to here, where it cannot: a progress stream is a socket held open, which
+       * is the one thing the transport-agnostic shape above cannot express. So
+       * the route hands over a *function* rather than a socket. It is given
+       * `send`, which frames one event, and `close`, which ends the response;
+       * it never sees the `ServerResponse`, cannot set a header, and cannot
+       * write an unframed byte. The adapter calls the returned teardown when the
+       * client disconnects.
+       */
+      open: (channel: StreamChannel) => (() => void) | void;
     };
+
+export interface StreamChannel {
+  /** Sends one server-sent event. Named events; the browser listens per name. */
+  send: (event: string, data: unknown) => void;
+  /** A comment line. Keeps an idle connection alive through a proxy. */
+  comment: (text: string) => void;
+  close: () => void;
+}
 
 export type ApiHandler = (request: ApiRequest) => Promise<ApiResponse>;
 

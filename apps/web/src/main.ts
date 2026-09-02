@@ -1,8 +1,14 @@
 #!/usr/bin/env -S npx tsx
+import os from "node:os";
 import path from "node:path";
 import {
   ANALYSIS_SYSTEMS,
+  DATABASE_ENV_VAR,
   DEFAULT_ANALYSIS_SYSTEM,
+  MEMORY_DATABASE,
+  SqliteAnalysisStore,
+  resolveDatabaseLocation,
+  type AnalysisStore,
 } from "@repo-arch/app";
 import {
   formatError,
@@ -32,6 +38,11 @@ import { startWebServer } from "./server";
  * `--root` is the workspace: the only directory tree a request may name a repository
  * inside. It defaults to the current working directory, which for the common case ("look
  * at the repositories next to this one") is what someone means.
+ *
+ * `--db` is where analyses are kept. It defaults to a per-user database outside the
+ * workspace, never inside it — see `resolveDatabaseLocation`. A store that cannot be
+ * opened stops the server here rather than at the first request, because a dashboard
+ * that lists analyses is not worth starting if nothing can be saved.
  */
 
 const USAGE = `repo-arch web — analyse a repository in the browser, with its evidence
@@ -44,6 +55,9 @@ FLAGS
                       Default: the current directory.
   --port <n>          Port to listen on (default 4173). 0 asks the OS for a free one.
   --host <name>       Interface to bind (default 127.0.0.1 — loopback only).
+  --db <path>         Analysis database file. Default: ~/.repo-archaeologist/analyses.db.
+                      ":memory:" keeps analyses only for the life of the process.
+                      It may not be inside the workspace named by --root.
   --mock              Use the offline deterministic provider. No API key, no cost.
   --model <id>        Model id (default: from REPO_ARCHAEOLOGIST_MODEL).
   --seed <n>          Sampling seed.
@@ -62,11 +76,12 @@ ENVIRONMENT
   GEMINI_API_KEY      Required unless --mock. Copy .env.example to .env.
                       The key is never printed, never written to a file, and never
                       sent to the browser.
+  ${DATABASE_ENV_VAR}  Default analysis database path. --db overrides it.
 
 NOTES
   The server binds loopback only and refuses requests whose Host is not localhost.
   It never writes to an analysed repository: every read goes through the same
-  repository boundary the CLI uses.
+  repository boundary the CLI uses, and the database lives outside the workspace.
 `;
 
 interface ParsedArgs {
@@ -74,6 +89,7 @@ interface ParsedArgs {
   port: number | undefined;
   host: string | undefined;
   system: string | undefined;
+  db: string | undefined;
   overrides: ConfigOverrides;
   budget: ExplorationBudgetOverrides;
   precision: PrecisionPolicyOverrides;
@@ -86,6 +102,7 @@ export function parseWebArgs(argv: readonly string[]): ParsedArgs {
     port: undefined,
     host: undefined,
     system: undefined,
+    db: undefined,
     overrides: {},
     budget: {},
     precision: {},
@@ -137,6 +154,9 @@ export function parseWebArgs(argv: readonly string[]): ParsedArgs {
         break;
       case "--system":
         parsed.system = take();
+        break;
+      case "--db":
+        parsed.db = take();
         break;
       case "--mock":
         parsed.overrides.provider = "mock";
@@ -214,14 +234,31 @@ async function main(argv: readonly string[]): Promise<number> {
   const config = loadConfig(args.overrides);
   const workspaceRoot = path.resolve(args.root ?? process.cwd());
 
-  const running = await startWebServer({
+  const databaseLocation = resolveDatabaseLocation({
+    explicit: args.db,
     workspaceRoot,
-    config,
-    budget: loadExplorationBudget(args.budget),
-    precisionPolicy: loadPrecisionPolicy(args.precision),
-    host: args.host,
-    port: args.port,
+    env: process.env,
+    homeDirectory: os.homedir(),
   });
+  const store: AnalysisStore = new SqliteAnalysisStore({ location: databaseLocation });
+
+  let running: Awaited<ReturnType<typeof startWebServer>>;
+  try {
+    running = await startWebServer({
+      workspaceRoot,
+      config,
+      budget: loadExplorationBudget(args.budget),
+      precisionPolicy: loadPrecisionPolicy(args.precision),
+      host: args.host,
+      port: args.port,
+      store,
+    });
+  } catch (error) {
+    // The database is open by now. Closing it before rethrowing keeps a failed start
+    // from leaving a WAL behind for the next run to recover.
+    await store.close();
+    throw error;
+  }
 
   const described = describeConfig(config);
   process.stdout.write(
@@ -230,6 +267,7 @@ async function main(argv: readonly string[]): Promise<number> {
       `repo-arch web  ${running.url}`,
       "",
       `workspace:  ${workspaceRoot}`,
+      `database:   ${databaseLocation === MEMORY_DATABASE ? "in memory (analyses are not kept)" : databaseLocation}`,
       `provider:   ${String(described.provider)} / ${String(described.model)}`,
       `api key:    ${String(described.apiKey)}`,
       `default:    ${args.system ?? DEFAULT_ANALYSIS_SYSTEM} system`,
@@ -240,9 +278,14 @@ async function main(argv: readonly string[]): Promise<number> {
   );
 
   const stop = (): void => {
-    void running.close().then(() => {
-      process.exitCode = 0;
-    });
+    // Close the server first: an in-flight request may still be writing, and a store
+    // closed underneath it would turn a clean shutdown into a `StorageError` in a log.
+    void running
+      .close()
+      .then(() => store.close())
+      .then(() => {
+        process.exitCode = 0;
+      });
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
