@@ -7,6 +7,8 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
     <header class="topbar">
       <div class="brand">repo<span>-arch</span></div>
 
@@ -29,19 +31,30 @@
       <div class="provider" id="provider"></div>
     </header>
 
+    <!--
+      The progress panel's host.
+
+      It sits outside `<main>` on purpose: `render()` clears `#main` on every section
+      change, and progress has to survive that. `renderProgress` owns this element and
+      rebuilds only its contents, so a phase arriving every few seconds never moves the
+      scroll position or drops focus somewhere else on the page.
+    -->
+    <div class="progress-host" id="progress" hidden></div>
+
     <div class="layout">
-      <nav class="sidebar">
+      <nav class="sidebar" aria-label="Sections">
         <ul class="nav" id="nav"></ul>
         <div class="recent">
           <h3>Recent analyses</h3>
           <ul id="recent"></ul>
         </div>
         <p class="sidebar-note">
-          Analyses are held in memory. Restarting the server clears them.
+          Analyses are saved to this machine and survive a restart. Deleting one removes its
+          evidence with it.
         </p>
       </nav>
 
-      <main id="main">
+      <main id="main" tabindex="-1">
         <section class="empty" id="placeholder">
           <h1>Show me where you found it.</h1>
           <p>
@@ -52,18 +65,29 @@
       </main>
     </div>
 
-    <aside class="drawer" id="drawer" hidden>
+    <aside class="drawer" id="drawer" hidden aria-label="Evidence">
       <header>
         <div>
           <span class="drawer-eyebrow" id="drawer-eyebrow">Evidence</span>
           <h2 id="drawer-title">&nbsp;</h2>
         </div>
-        <button class="ghost" id="drawer-close" type="button" aria-label="Close">&times;</button>
+        <button class="ghost" id="drawer-close" type="button" aria-label="Close evidence">&times;</button>
       </header>
       <div class="drawer-body" id="drawer-body"></div>
     </aside>
 
-    <div class="status" id="status" hidden></div>
+    <!--
+      The visible toast, and the two announcements beside it.
+
+      `#status` is `aria-hidden` so its text is never read twice. `#announce` and `#alert`
+      are always in the document and never hidden, because a live region revealed in the
+      same tick as its text changes is unreliably announced. An error goes to `#alert`
+      (`role="alert"` interrupts); everything else goes to `#announce` (`role="status"`
+      waits its turn).
+    -->
+    <div class="status" id="status" hidden aria-hidden="true"></div>
+    <div class="sr-only" id="announce" role="status" aria-live="polite"></div>
+    <div class="sr-only" id="alert" role="alert" aria-live="assertive"></div>
 
     <script type="module" src="/app.js"></script>
   </body>

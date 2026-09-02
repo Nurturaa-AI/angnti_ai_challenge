@@ -120,11 +120,31 @@ delete it.
 ## Test
 
 ```sh
-pnpm test         # 620 tests
+pnpm test         # 644 tests
 pnpm typecheck    # tsc --noEmit, strict
 ```
 
 The whole suite runs offline with the model stubbed: no API key, no network, no cost.
+
+Two of those tests are a different kind and are worth knowing about, because their absence
+cost an entire iteration. `apps/web/test/ui.test.ts` imports the browser's pure logic and
+asserts what it decides; `apps/web/test/wiring.test.ts` reads the shipped `app.js`,
+`index.html` and `styles.css` as text and asserts the **seams** — that the entry point
+parses, that nothing imported is also declared locally or left uncalled, that every element
+id has a host, that every class has a rule. A unit test proves a module works. Only the
+second kind proves the product reaches it. Neither renders the page; see item 7 of
+[`## Next`](CHANGELOG.md#next) for what that still leaves unchecked.
+
+```sh
+pnpm verify:measured --ref <git-ref>                    # what changed under the measured path
+pnpm verify:measured --compare before.json after.json   # did the systems answer differently?
+```
+
+Every iteration since the first has carried a benchmark number forward by arguing the
+measured path did not change. This turns the argument into a command with an exit code: it
+fails on any deletion under `advanced/src`, `baseline/src`, `evaluation/`,
+`packages/evaluator/` or `fixtures/`, on any change at all to the frozen ones, and on a
+`systemVersion` that moved without a re-measurement.
 
 ---
 

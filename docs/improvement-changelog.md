@@ -1054,3 +1054,127 @@ $0.00. No paid model call was made: both evaluation runs are the offline mock pr
 620-test suite and the typecheck are offline by construction. 2 378 lines of source and 1 870 lines
 of test, and the thing they buy is not a number on the benchmark — it is that closing the tab is no
 longer the same event as losing the analysis.
+
+## Iteration 5, continued — The Product Nobody Loaded
+
+An audit, not a feature. It is recorded here as an iteration because it followed the same shape and
+produced a result, and because the alternative — quietly amending the entry above — is the one thing
+this file is not allowed to do.
+
+### Hypothesis
+
+Written before the audit, and this time genuinely first — there was no code to write yet, only a
+tree to check.
+
+> Iteration 5's entry claims a browser that watches an analysis happen, filters a graph, opens an
+> outline and reports three question states. Every one of those claims rests on `app.js`, and
+> **nothing in the 620-test suite loads `app.js`.** `ui.test.ts` imports `ui.js`, which is the file
+> that was designed to be importable; `api.test.ts` and `integration.test.ts` exercise the server.
+>
+> If a claim's only support is a file no test reads, the claim is unverified. So: an audit against
+> the specification's own Definition of Done will find defects, they will be concentrated in exactly
+> the parts with no test, and they will be **wiring** defects rather than logic defects — because the
+> logic is the part that got extracted into the testable module.
+
+Falsifiable, and worth stating because it could have been wrong: a careful author with no test can
+still write correct wiring, and the audit could have come back clean.
+
+### Change
+
+The audit ran the entry point the way a browser would, which the suite had never done:
+
+```
+node --input-type=module -e 'import("./app.js")'
+→ SyntaxError: Identifier 'layoutGraph' has already been declared
+```
+
+The prediction was not merely confirmed, it was overshot. `app.js` did not have wiring defects; it
+did not execute. `layoutGraph`, `truncate` and `countOmittedClaims` had been extracted into `ui.js`,
+imported back at the top of the file, and left in place at the bottom. A duplicate `const` at module
+scope is not a warning — the module never evaluates, and every feature Iteration 5 described was
+described accurately about a file the browser refused to run.
+
+Underneath that, in the layer the audit could only reach once the file parsed:
+
+- `#announce` and `#alert` did not exist. `toast()` had a ten-line comment explaining why an error
+  goes to `role="alert"` and everything else to `role="status"`, and wrote to two elements that were
+  never in `index.html` — so every status message would have thrown, including the ones reporting a
+  failure.
+- `#progress` did not exist and `.progress` had no rule, so the phase panel — a Definition-of-Done
+  item — took its `if (!host) return` branch on every call. Progress arrived over SSE, updated the
+  state and painted nothing.
+- Eleven imported helpers had no caller: node detail, edge detail, graph filtering, node search,
+  related-node highlighting, the graph's screen-reader summary, the phase checklist, the three
+  question outcomes, evidence line ranges and evidence strength. Tested, passing, unreachable.
+- `state.graph.selected` was documented as `{ kind, id }` "because an edge is selectable now" and
+  used as a bare node id; `state.drawerReturn` was declared, commented and never written, so closing
+  the drawer dropped focus to the top of the document.
+- Eleven classes on the recent-analyses row had no CSS, and neither did `.pill` — so in the iteration
+  whose entire subject was that an analysis now has a status worth reading, every status rendered as
+  unstyled inline text.
+- `--ink-faint` was 2.99:1 on `--panel`, against a 4.5:1 floor, on the labels it exists to style.
+
+The fix wired the tested logic in and deleted the untested duplicates, which is why it added features
+without adding logic. Then the durable part: `apps/web/test/wiring.test.ts`, 24 tests that read the
+shipped files as text and assert the seams — `node --check` on both modules, no import also declared
+locally, no import unused, every `$("id")` with a host, every class with a rule, every custom
+property defined, and evidence addressed only through its owning analysis.
+
+### Measurement
+
+Two things were measured, neither of them a benchmark.
+
+**Did the defects exist?** Yes, and the count is the measurement: 1 hard `SyntaxError`, 3 missing
+DOM hosts, 11 uncalled imports, 2 state fields contradicting their own comments, 12 unstyled classes,
+1 contrast failure, 1 stale route, 1 false statement to the user. Every one of them in a file with no
+test; none of them in `ui.js`, which had 50.
+
+**Did fixing them disturb anything measured?** No.
+
+| | Baseline `--mock` | Advanced `--mock` |
+| --- | --- | --- |
+| Run id | `eval-baseline-2026-09-02T03-07-29Z` | `eval-advanced-2026-09-02T03-07-44Z` |
+| Evidence-backed task accuracy | 21.4 % (3/14) | 28.6 % (4/14) |
+| Normalized diff vs the pre-Iteration-5 runs | **identical** | **identical** |
+
+`pnpm verify:measured --ref bd5c632` — added by this pass, so the claim is a command rather than a
+paragraph — reports `advanced/src/index.ts +40 −0`, `baseline/src/index.ts +17 −0`, both version
+constants unmoved, and nothing whatsoever under `evaluation/`, `packages/evaluator/` or `fixtures/`.
+Those 57 lines are Iteration 5's `onPhase` callback, untouched here. 644 tests, typecheck clean, all
+offline.
+
+### Result
+
+**Kept.** The hypothesis was confirmed in the strongest available form, and the confirmation is worse
+news than a rejection would have been: the previous entry's claims about the browser were not
+overstated, they were made about a file that never ran. The claims are true now, and there is a test
+that fails if they stop being.
+
+What is **not** claimed: that any analysis got better, that the dashboard is now verified end to end,
+or that 24 text-reading assertions are equivalent to rendering the page. They are not. They are the
+subset of correctness that can be checked without a DOM, which is a real subset and a bounded one —
+recorded as item 7 of `## Next`.
+
+### Decision
+
+**Kept, and recorded as a correction rather than a revision.** No text in Iteration 5's entry above
+was edited; the sentence claiming a browser that can watch an analysis happen still stands there, and
+this entry is what makes it honest. A changelog that edits its own past is a marketing document.
+
+The lesson generalises past this repository, so it is worth stating flatly: **`ui.js` was extracted
+to make the dashboard testable, and extracting it is what broke the dashboard.** The refactor moved
+the logic somewhere a test could reach, the tests were written against the new home, they passed, and
+the coverage they reported was coverage of a module with no caller. The suite grew by 50 tests while
+the product went from working to not loading, and every signal available said the iteration had gone
+well.
+
+A test that imports a module proves the module works. Only something that loads the entry point
+proves the product uses it — and until this pass, nothing did.
+
+### Cost of the result
+
+$0.00. No paid model call; both evaluation runs are the offline mock provider. Roughly 700 lines
+changed across `app.js`, `index.html` and `styles.css`, most of it deletion or rewiring rather than
+new logic, plus 220 lines of test and 130 lines of verification script. The cheapest defect-to-fix
+ratio of any iteration so far, for the largest defect — which is itself the point: the check that
+would have caught it is `node --check`, it takes 40 milliseconds, and it had never been run.

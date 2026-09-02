@@ -35,6 +35,14 @@ callback that says which phase the pipeline has reached. Neither is read by any 
 a regression test in each system asserts that a run with the observers produces a byte-identical
 record to a run without them.
 
+That property is load-bearing — it is the only reason two iterations of product work can carry
+Iteration 3's measured numbers forward — so it is checkable rather than argued:
+[`scripts/verify-measured-path.ts`](../scripts/verify-measured-path.ts) (`pnpm verify:measured
+--ref <ref>`) reports what differs under `advanced/src`, `baseline/src`, `evaluation/`,
+`packages/evaluator/` and `fixtures/`, and exits non-zero on a deletion, on any change to a frozen
+directory, or on a `systemVersion` that moved without a re-measurement. `--compare a.json b.json`
+strips run ids and wall clock from two result files and diffs what the systems actually answered.
+
 ---
 
 ## `packages/shared` — the contract
@@ -705,6 +713,45 @@ partly for that reason — there is no `unsafe-inline` to grant and no CDN to tr
 questions }`. The run record, the ledger text and the absolute repository root stay in memory. The
 repository path a report carries is the workspace-relative one the client named, not the server's
 own path to it.
+
+### The browser: two files, and the seam that broke
+
+`public/` is three files and no build step: `app.js`, `ui.js`, `styles.css`. The split between the
+two modules is the only architectural decision in the directory, and it is worth recording both what
+it is for and how it failed.
+
+`ui.js` holds everything that decides *what* to show — the graph layout, the filters, the outline
+projection, the status and phase vocabularies, every label and every threshold. `app.js` holds
+everything that needs a document: element construction, event wiring, the SVG, the event stream,
+focus management. The reason for the line is that the project has no bundler and no jsdom, so a
+module touching `document` can only be read by a human, while one that merely computes can be
+imported by a test. `ui.d.ts` beside it is a hand-written declaration — that is what lets a
+typechecked test call into a browser module in a project with no `allowJs`.
+
+The extraction worked and then caused the worst defect in the project's history. Three functions
+were moved into `ui.js`, imported back into `app.js`, and left in place at the bottom of the
+original. A duplicate `const` at module scope does not warn; the module never evaluates. `ui.js` got
+50 passing tests, `app.js` became a `SyntaxError`, and the whole dashboard was dead code for a
+commit. The suite grew and the product stopped loading, and every signal said otherwise.
+
+So there are two kinds of test here on purpose:
+
+| File | Kind | Proves |
+| --- | --- | --- |
+| [`ui.test.ts`](../apps/web/test/ui.test.ts) | imports the module | the decisions are right |
+| [`wiring.test.ts`](../apps/web/test/wiring.test.ts) | reads the shipped files as text | the product reaches them |
+
+`wiring.test.ts` asserts what needs no DOM: both modules parse (`node --check`, which is the 40 ms
+check that would have caught the failure), no imported name is also declared locally, no imported
+name is unused, every `$("id")` has a host in `index.html` or is created before it is read, every
+class applied has a rule, every custom property read is defined, and every evidence request is
+addressed as `/api/analyses/:id/evidence/:evidenceId` rather than through a global endpoint. Each of
+those corresponds to a defect that shipped — the unused-import check alone was hiding eleven working,
+tested, unreachable features.
+
+Neither kind renders the page. That is the layer's real remaining gap and it is recorded as such,
+not as a plan: nothing verifies that clicking a node opens its panel or that Escape returns focus to
+the chip that opened the drawer.
 
 ### Security boundaries, in one place
 
