@@ -75,6 +75,7 @@ export {
   ANALYSIS_STATUSES,
   MAX_STORED_QUESTIONS,
   TERMINAL_STATUSES,
+  AnalysisNotFoundError,
   isTerminal,
   type AnalysisMetadata,
   type AnalysisPatch,

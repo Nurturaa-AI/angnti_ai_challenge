@@ -6,7 +6,7 @@ import type { AnalysisReport } from "../report";
 import type { ArchitectureGraph } from "../architecture";
 import type { AnsweredQuestionView } from "../questions";
 import type { AnalysisSystem } from "../service";
-import { ANALYSIS_STATUSES, MAX_STORED_QUESTIONS } from "./types";
+import { ANALYSIS_STATUSES, AnalysisNotFoundError, MAX_STORED_QUESTIONS } from "./types";
 import type {
   AnalysisPatch,
   AnalysisPhase,
@@ -329,7 +329,7 @@ export class SqliteAnalysisStore implements AnalysisStore {
     try {
       this.transaction(() => {
         const exists = this.db.prepare("SELECT 1 FROM analyses WHERE id = ?").get(id);
-        if (exists === undefined) throw new StorageError(`No analysis ${id}.`);
+        if (exists === undefined) throw new AnalysisNotFoundError(id);
 
         const assignments: string[] = ["updated_at = ?"];
         const values: (string | number | null)[] = [timestamp];
@@ -382,7 +382,7 @@ export class SqliteAnalysisStore implements AnalysisStore {
     }
 
     const updated = await this.get(id);
-    if (updated === undefined) throw new StorageError(`No analysis ${id}.`);
+    if (updated === undefined) throw new AnalysisNotFoundError(id);
     return updated;
   }
 
@@ -409,7 +409,7 @@ export class SqliteAnalysisStore implements AnalysisStore {
     try {
       this.transaction(() => {
         const exists = this.db.prepare("SELECT 1 FROM analyses WHERE id = ?").get(analysisId);
-        if (exists === undefined) throw new StorageError(`No analysis ${analysisId}.`);
+        if (exists === undefined) throw new AnalysisNotFoundError(analysisId);
 
         const next = this.db
           .prepare("SELECT COALESCE(MAX(ordinal), -1) + 1 AS next FROM questions WHERE analysis_id = ?")

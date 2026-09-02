@@ -388,6 +388,16 @@ export function createApi(dependencies: ApiDependencies): WebApi {
 
   const routeDelete = async (analysisId: string): Promise<ApiResponse> => {
     const id = requireId(analysisId);
+    // Tell the runner before the row goes, not after.
+    //
+    // A run outlives the request that started it, so this is the one route that
+    // can destroy a record while something is still writing to it. Announcing the
+    // delete first turns "the row vanished under me" into "I was told to stop":
+    // the run stops at its next boundary and discards its result, instead of
+    // failing against a missing row once per phase and then failing again trying
+    // to record that failure. The runner also recognises the deletion on its own
+    // if the two race, so this is an optimisation of the log, not the invariant.
+    const cancelled = runner.abandon(id);
     const removed = await store.delete(id);
     if (!removed) {
       throw new RequestError(`No analysis with id "${id}".`, undefined, { notFound: true });
@@ -395,7 +405,7 @@ export function createApi(dependencies: ApiDependencies): WebApi {
     // Progress for an id that no longer exists is not progress. Forgetting it also
     // closes the door on a subscriber holding a stream open for a deleted analysis.
     events.forget(id);
-    return jsonResponse({ deleted: id }, 200);
+    return jsonResponse({ deleted: id, cancelled }, 200);
   };
 
   /**

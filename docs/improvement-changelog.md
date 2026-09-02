@@ -1178,3 +1178,102 @@ changed across `app.js`, `index.html` and `styles.css`, most of it deletion or r
 new logic, plus 220 lines of test and 130 lines of verification script. The cheapest defect-to-fix
 ratio of any iteration so far, for the largest defect — which is itself the point: the check that
 would have caught it is `node --check`, it takes 40 milliseconds, and it had never been run.
+
+---
+
+## Iteration 5, continued (2) — The Record That Was Deleted Underneath Its Run
+
+A single bug, found by running the product rather than by testing it. Recorded here for the same
+reason the entry above is: it followed the shape, and it produced a result that changes what the
+previous entries are allowed to claim.
+
+### Hypothesis
+
+The observation came first, from a real `pnpm web` session against `gemini-3.5-flash` — seven log
+lines for one analysis, ending:
+
+```
+analysis an-mtjkeuuv-1 failed: StorageError: No analysis an-mtjkeuuv-1
+analysis an-mtjkeuuv-1 could not be marked failed: StorageError: No analysis an-mtjkeuuv-1
+```
+
+Six hypotheses were enumerated before any code was read, precisely because the tempting one — "the
+create never committed" — is the tempting one:
+
+> **A.** never persisted · **B.** a second database · **C.** persisted, then deleted ·
+> **D.** a transaction that never committed · **E.** a store closed under the runner ·
+> **F.** an id mismatch between create and lookup.
+>
+> The shape of the log already discriminates. A record that never landed fails at `validating`, the
+> runner's *first* write. This one survived `validating`, survived `analyzing`, and first failed at
+> `synthesizing` — five phases in. **The row existed.** Something removed it mid-run.
+
+### Change
+
+**C, confirmed.** WAL forensics on `~/.repo-archaeologist/analyses.db` found five ids written across
+two processes and absent from the table; `DELETE /api/analyses/:id` was the only code path that
+removes a row, and `0.6.0` had detached the run from the request without giving that route any way
+to know a run was in progress. The record's lifetime was controlled by one HTTP request; the run's
+lifetime was not. Nothing reconciled them.
+
+The fix is a lifecycle interlock, entirely in persistence and wiring:
+
+- `AnalysisRunner` tracks live ids and exposes `abandon(id)`; `routeDelete` calls it *before*
+  `store.delete(id)` and reports `{ deleted, cancelled }`.
+- The run checks at its own write boundaries, discards its result, and logs once.
+- `AnalysisNotFoundError extends StorageError` carries the id, so a run recognises its *own* record
+  vanishing even when nothing announced it — and cannot mistake a broken database for a delete.
+
+What was deliberately **not** done, because each was the cheaper way to make the log go quiet: the
+store's missing-record error was not softened to `undefined`, `update` was not made to create rows,
+no fallback record is written, and the pipeline is not interrupted — interrupting it would mean
+editing `advanced/src/index.ts`, which is the measured path.
+
+### Measurement
+
+Not a benchmark. Two things were measured.
+
+**Do the new tests fail against the old code?** `git stash` of the five source files, then re-run:
+**7 failed / 7 passed**, the decisive one reproducing the reported symptom exactly —
+
+```
+Expected: "The analysis was deleted while it was running."
+Received: "No analysis an-mtkmckcc-1."
+```
+
+which also shows the second defect this found: the store's internal invariant message was reaching
+the record's `error` field, and from there the browser.
+
+**Did the fix disturb anything measured?** No. `pnpm verify:measured --ref HEAD` — *"clean — no file
+under the measured path differs"*, `ADVANCED_VERSION` 0.1.0 → 0.1.0, `BASELINE_VERSION` 0.1.0 →
+0.1.0. 658 tests (644 + 14), typecheck clean.
+
+**No benchmark claim is made, in either direction.** No evaluation run was performed for this pass,
+because nothing that an evaluation measures was touched.
+
+### Result
+
+**Kept.** The lesson is narrower than the previous entry's and points the same way: 644 tests, and
+**not one of them covered `DELETE`**, while every store test ran against `:memory:`. The suite
+tested persistence in a store that does not persist, and tested a lifecycle with its destructor
+excluded. Neither gap is visible from a coverage number.
+
+What is **not** claimed: that the mid-run race was won against the real binary. It was not. The mock
+provider finishes an analysis in well under a second, and raising every budget, analysing the whole
+monorepo and serving a synthetic 12 000-file workspace all still completed before a `DELETE` could
+arrive; `packages/shared/src/config.ts` supports only `gemini | mock` and no API key is configured
+here. The cancellation is proven over a real socket against a real database file
+(`apps/web/test/durability.test.ts`), which is a weaker statement than "reproduced against the
+provider that produced the original log", and is recorded as such.
+
+### Decision
+
+**Kept.** The invariant is now written down in `docs/architecture.md` rather than implied: a
+record's lifetime must cover its run, and whatever ends it early must say so first.
+
+### Cost of the result
+
+$0.00 — no paid model call. Roughly 130 lines of source across six files, 470 lines of test across
+two new files, and one root patch version. The investigation cost more than the fix, which is the
+usual ratio when the log is pointing at the wrong file: five of the seven lines named the store, and
+none of them named the route that was actually responsible.

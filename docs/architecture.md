@@ -648,6 +648,35 @@ vanishes. The runner does not queue, retry or schedule — one analysis per call
 this process. A queue would be the right answer to a problem a loopback tool for one user does not
 have.
 
+#### Who owns the record while the work runs
+
+Detaching the run from the request created a second lifetime, and `0.6.2` fixed the place the two
+were never reconciled. The **store is application-scoped**: `main.ts` opens it once, hands the same
+instance to the routes and to the runner, and closes it when the process exits. A detached run
+therefore never depends on a request-scoped resource. But the *record* has its own lifetime, and one
+route controls it — `DELETE /api/analyses/:id` removed the row of an analysis that was still
+running, and the run then failed once per remaining phase, once at its terminal write, and once more
+trying to record that failure.
+
+The invariant is now explicit: **a record's lifetime must cover its run, and whatever ends it early
+must say so first.** `AnalysisRunner` tracks which ids are live and exposes `abandon(id)`;
+`routeDelete` calls it *before* `store.delete(id)`, so a delete of a running analysis is a
+**cancellation**, and the route reports which it was (`{ deleted, cancelled }`).
+
+Abandonment is **cooperative, and stops persistence only**. The run checks at each of its own write
+boundaries and discards its result; the pipeline underneath is not interrupted, because interrupting
+it would mean reaching into the measured analysis path for a lifecycle problem. An already-issued
+model call still finishes and its output is dropped. The record is never recreated — resurrecting
+the row would be the runner overruling the person who deleted it.
+
+The store's missing-record error was not weakened to make this work. `get` and `update` still throw
+on an id that has no row, because a caller naming an id is asserting the row is there. What changed
+is that they throw [`AnalysisNotFoundError`](../packages/app/src/store/types.ts), a `StorageError`
+subclass carrying the id, so the record's owner can tell *"the row I created is gone"* from *"the
+database is broken"* and stop on the first observation even when nothing announced the delete. Its
+`name` stays `"StorageError"`: the HTTP layer maps on that string, and a deleted record is not a new
+category of failure to an API client.
+
 ### The export seam
 
 `ReportExporter` is `{ format, contentType, filename(report), export(input) }`. The one
@@ -687,6 +716,7 @@ GET  /api/health                                  provider, model, systems, limi
 GET  /api/repositories                            analysable directories in the workspace
 POST /api/analyze                    {repository, system?, focus?}   → 201 report + graph
 GET  /api/analyses                                what has been analysed this session
+DELETE /api/analyses/:id                          → {deleted, cancelled} — cancels a running one
 GET  /api/analysis/:id                            report + graph + answered questions
 POST /api/questions                  {analysisId, question}          → 201 answered question
 GET  /api/analysis/:id/evidence/:evidenceId       one citation, its source text, its offsets

@@ -4,6 +4,7 @@ import { AnalysisEventBus, PHASE_MESSAGES, logFailureMessage, safeFailureMessage
 import { buildAnalysisReport, type AnalysisReport } from "./report";
 import { analyzeRepository, DEFAULT_ANALYSIS_SYSTEM, systemSupportsFocus, type AnalysisSystem } from "./service";
 import { projectEvidence } from "./store/projection";
+import { AnalysisNotFoundError } from "./store/types";
 import type { AnalysisPhase, AnalysisRecord, AnalysisStore } from "./store/types";
 import { resolveRepositoryRequest } from "./workspace";
 
@@ -23,6 +24,14 @@ import { resolveRepositoryRequest } from "./workspace";
  * this product does not have — it serves one user on loopback — and the wrong
  * kind of complexity to add speculatively.
  */
+
+/**
+ * What a caller is told when its analysis was deleted while it was running.
+ *
+ * Safe by construction — it names no path, no provider and no internal state —
+ * and it is the truth: nothing failed, someone removed the record on purpose.
+ */
+const DELETED_WHILE_RUNNING = "The analysis was deleted while it was running.";
 
 export interface AnalysisRunnerDependencies {
   store: AnalysisStore;
@@ -75,10 +84,40 @@ export class AnalysisRunner {
   private readonly now: () => Date;
   private readonly logError: (message: string) => void;
   private nextId = 1;
+  /** Analyses this runner is executing right now. */
+  private readonly live = new Set<string>();
+  /** Of those, the ones whose record has stopped existing under them. */
+  private readonly abandoned = new Set<string>();
 
   constructor(private readonly dependencies: AnalysisRunnerDependencies) {
     this.now = dependencies.now ?? ((): Date => new Date());
     this.logError = dependencies.logError ?? ((message: string): void => console.error(message));
+  }
+
+  /** True while this runner is executing the analysis. */
+  isRunning(id: string): boolean {
+    return this.live.has(id);
+  }
+
+  /**
+   * Stops persisting an analysis, because its record is about to stop existing.
+   *
+   * A run outlives the request that started it, so a delete is the one thing that
+   * can pull a record out from under work that is still going. Whoever removes a
+   * record must say so here *first*: the run then stops writing at its next
+   * boundary and discards its result, instead of failing once per phase against a
+   * row that is gone and finishing with a failure it cannot record either.
+   *
+   * Cooperative on purpose. The pipeline itself is not interrupted — that would
+   * mean reaching into the measured analysis path — so an already-issued model
+   * call still finishes; only its persistence stops. Returns `true` if an
+   * analysis was in fact running, which lets a caller tell "deleted a finished
+   * record" from "cancelled a running one".
+   */
+  abandon(id: string): boolean {
+    if (!this.live.has(id)) return false;
+    this.abandoned.add(id);
+    return true;
   }
 
   /**
@@ -122,6 +161,7 @@ export class AnalysisRunner {
       status: record.status,
     });
 
+    this.live.add(id);
     return { record, completion: this.run(record) };
   }
 
@@ -131,6 +171,7 @@ export class AnalysisRunner {
     const startedMs = Date.parse(created.createdAt);
 
     try {
+      if (this.abandoned.has(id)) return this.discard(created);
       await this.dependencies.store.update(id, { status: "validating" });
       this.dependencies.events.emit({
         type: "analysis.started",
@@ -147,6 +188,7 @@ export class AnalysisRunner {
         created.repositoryPath,
       );
 
+      if (this.abandoned.has(id)) return this.discard(created);
       await this.dependencies.store.update(id, { status: "analyzing" });
 
       const run = await analyzeRepository({
@@ -162,6 +204,11 @@ export class AnalysisRunner {
           void this.recordPhase(id, phase);
         },
       });
+
+      // The record may have gone while the pipeline ran. It is not recreated: a
+      // delete asked for this analysis to stop existing, and resurrecting the row
+      // here would be the runner overruling the person who deleted it.
+      if (this.abandoned.has(id)) return this.discard(created);
 
       await this.recordPhase(id, "building-report");
       // The caller named this repository *inside the workspace*, so that is the path
@@ -204,9 +251,16 @@ export class AnalysisRunner {
       });
       return completed;
     } catch (error) {
+      // A record that no longer exists is not a failed analysis. There is nothing
+      // to write the failure to, nobody left watching it, and "failed" would be a
+      // claim about a row that is gone.
+      const gone = this.abandoned.has(id) || this.observeDeletion(id, error);
+      if (gone && error instanceof AnalysisNotFoundError) return this.discard(created);
+
       // Everything in full to the operator's log; one safe sentence to the record.
       this.logError(`analysis ${id} failed: ${logFailureMessage(error)}`);
       const message = safeFailureMessage(error);
+      if (gone) return this.discard(created);
 
       try {
         const failed = await this.dependencies.store.update(id, {
@@ -223,6 +277,8 @@ export class AnalysisRunner {
         });
         return failed;
       } catch (storeError) {
+        // Deleted between the failure and the attempt to record it: the delete wins.
+        if (this.observeDeletion(id, storeError)) return this.discard(created);
         // The store is gone as well. Report the progress event anyway, so a
         // watching client stops waiting, and hand back what we last knew.
         this.logError(`analysis ${id} could not be marked failed: ${logFailureMessage(storeError)}`);
@@ -234,11 +290,43 @@ export class AnalysisRunner {
         });
         return { ...created, status: "failed", error: message };
       }
+    } finally {
+      this.live.delete(id);
+      this.abandoned.delete(id);
     }
+  }
+
+  /**
+   * Notices that the record has been destroyed, and remembers it.
+   *
+   * Remembering is the point: without it a run whose row vanished mid-pipeline
+   * fails once per remaining phase, then once more at the end, then once again
+   * trying to record *that* — the seven-line log this fixed. One observation
+   * stops all of them.
+   */
+  private observeDeletion(id: string, error: unknown): boolean {
+    if (!(error instanceof AnalysisNotFoundError) || error.analysisId !== id) return false;
+    this.abandoned.add(id);
+    return true;
+  }
+
+  /**
+   * The terminal outcome of a run whose record was deleted underneath it.
+   *
+   * Nothing is written, because there is nowhere to write it. The returned record
+   * is the last state this runner knew, marked failed so that a caller awaiting
+   * `completion` — the synchronous alias — gets an answer rather than a report
+   * about a repository the user has already thrown away.
+   */
+  private discard(created: AnalysisRecord): AnalysisRecord {
+    this.logError(`analysis ${created.id} was deleted while it was running; its result was discarded.`);
+    return { ...created, status: "failed", error: DELETED_WHILE_RUNNING };
   }
 
   /** Persists the phase and announces it. A failed write must not fail the run. */
   private async recordPhase(id: string, phase: AnalysisPhase): Promise<void> {
+    // A deleted analysis has no progress to report and no row to report it in.
+    if (this.abandoned.has(id)) return;
     this.dependencies.events.emit({
       type: "analysis.phase",
       analysisId: id,
@@ -249,6 +337,8 @@ export class AnalysisRunner {
     try {
       await this.dependencies.store.update(id, { phase });
     } catch (error) {
+      // The run's own boundary check reports the deletion once, in one place.
+      if (this.observeDeletion(id, error)) return;
       this.logError(`analysis ${id} phase ${phase} not recorded: ${logFailureMessage(error)}`);
     }
   }
