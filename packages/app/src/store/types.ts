@@ -2,6 +2,7 @@ import type { AnalysisReport } from "../report";
 import type { ArchitectureGraph } from "../architecture";
 import type { AnsweredQuestionView } from "../questions";
 import type { AnalysisSystem } from "../service";
+import { StorageError } from "@repo-arch/shared";
 import type { EvidenceType } from "@repo-arch/shared";
 
 /**
@@ -146,6 +147,33 @@ export interface AnalysisPatch {
   graph?: ArchitectureGraph | null | undefined;
   /** Replaces the stored evidence set when present. */
   evidence?: readonly StoredEvidenceSource[] | undefined;
+}
+
+/**
+ * The record an operation names does not exist.
+ *
+ * This is still a `StorageError` and still an invariant violation: every caller
+ * that names an id is asserting the row is there, and a store that quietly
+ * returned nothing instead would push the contradiction downstream to a place
+ * where it is much harder to explain. The subclass exists for exactly one
+ * reason: a caller holding a record can now tell *"the row I created is gone"*
+ * apart from *"the database is broken"*, which are the same message but very
+ * different situations. Only the record's owner should act on the distinction —
+ * see `AnalysisRunner`.
+ *
+ * `name` stays `"StorageError"` deliberately. It is the wire category the HTTP
+ * layer maps on, and a deleted record is not a new kind of failure to an API
+ * client; it is the same one, with more information available in-process.
+ */
+export class AnalysisNotFoundError extends StorageError {
+  /** The id that had no row. */
+  readonly analysisId: string;
+
+  constructor(analysisId: string) {
+    super(`No analysis ${analysisId}.`);
+    this.name = "StorageError";
+    this.analysisId = analysisId;
+  }
 }
 
 /**

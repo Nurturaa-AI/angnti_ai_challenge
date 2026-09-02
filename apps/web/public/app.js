@@ -391,7 +391,7 @@ function deleteControl(row) {
 async function deleteAnalysis(id, name) {
   state.confirmDelete = null;
   try {
-    await api(`/api/analyses/${encodeURIComponent(id)}`, { method: "DELETE" });
+    const outcome = await api(`/api/analyses/${encodeURIComponent(id)}`, { method: "DELETE" });
     if (state.analysis?.id === id) {
       // The record is gone, and so is the evidence its ids addressed. Dropping the
       // cache matters: a stale payload would let the drawer keep showing an excerpt
@@ -402,7 +402,15 @@ async function deleteAnalysis(id, name) {
       state.progress = null;
       closeDrawer();
     }
-    toast(`Deleted the analysis of ${name}. Its evidence is no longer available.`);
+    // Deleting an analysis that is still running cancels it. Saying so matters:
+    // the work stops and its result is discarded, and a user who deleted the wrong
+    // row should learn that from the toast rather than from a run that never
+    // appears.
+    toast(
+      outcome?.cancelled === true
+        ? `Cancelled and deleted the analysis of ${name}. It was still running; its result was discarded.`
+        : `Deleted the analysis of ${name}. Its evidence is no longer available.`,
+    );
     setTimeout(() => toast(null), 6000);
     await loadAnalyses();
     render();

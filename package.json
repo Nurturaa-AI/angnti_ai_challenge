@@ -1,6 +1,6 @@
 {
   "name": "repo-archaeologist",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "private": true,
   "type": "module",
   "description": "Understand an unfamiliar codebase before you change it. Evidence-backed engineering briefings for unfamiliar Git repositories.",

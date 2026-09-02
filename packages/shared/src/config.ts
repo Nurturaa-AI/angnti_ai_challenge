@@ -232,7 +232,9 @@ function kebabCase(key: string): string {
 // Precision policy: how the agent is allowed to cite what it obtained.
 // ---------------------------------------------------------------------------
 
-export type PrecisionPolicyOverrides = Partial<Record<keyof PrecisionPolicy, number | undefined>>;
+export type PrecisionPolicyOverrides = Partial<
+  Record<keyof PrecisionPolicy, number | undefined>
+>;
 
 const PRECISION_ENV_VARS: Record<keyof PrecisionPolicy, string> = {
   maxCorroborations: "REPO_ARCHAEOLOGIST_MAX_CORROBORATIONS",
@@ -246,14 +248,17 @@ export function loadPrecisionPolicy(
 ): PrecisionPolicy {
   const policy = { ...DEFAULT_PRECISION_POLICY };
 
-  for (const key of Object.keys(PRECISION_ENV_VARS) as Array<keyof PrecisionPolicy>) {
+  for (const key of Object.keys(PRECISION_ENV_VARS) as Array<
+    keyof PrecisionPolicy
+  >) {
     const variable = PRECISION_ENV_VARS[key];
     const fromEnv = parseNumber(env[variable], variable);
     const value = overrides[key] ?? fromEnv;
     if (value === undefined) continue;
     const minimum = PRECISION_ZERO_ALLOWED.has(key) ? 0 : 1;
     if (!Number.isInteger(value) || value < minimum) {
-      const source = overrides[key] === undefined ? variable : `--${kebabCase(key)}`;
+      const source =
+        overrides[key] === undefined ? variable : `--${kebabCase(key)}`;
       throw new ConfigError(
         `${source} must be a whole number of ${minimum} or more, received "${String(value)}".`,
         minimum === 1

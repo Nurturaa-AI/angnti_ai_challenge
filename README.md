@@ -331,6 +331,11 @@ durability costs no new dependency. Three properties are worth stating because e
   the feature.
 - Excerpts are **redacted on the way in**, so a restart cannot change what the viewer shows and its
   line offsets are correct by construction. The ledger the pipeline grounds against stays raw.
+- A record **outlives the request that created it, and covers the run it started.** `POST` returns as
+  soon as the row is durable and the analysis continues in the background, so the only thing that can
+  pull the record out from under it is a delete — which is therefore a *cancellation*: the run is
+  told first, stops writing at its next boundary and discards its result. It is not resurrected, and
+  nothing else invents a record for it.
 
 **The API**, all JSON, all loopback:
 
@@ -341,7 +346,7 @@ durability costs no new dependency. Three properties are worth stating because e
 | `POST /api/analyses` | Starts an analysis and returns the `queued` record immediately |
 | `GET /api/analyses` | Every analysis the workspace still holds |
 | `GET /api/analyses/:id` | The stored report, graph and answered questions |
-| `DELETE /api/analyses/:id` | Forgets one analysis |
+| `DELETE /api/analyses/:id` | Forgets one analysis, and cancels it first if it is still running |
 | `GET /api/analyses/:id/events` | Server-sent progress, replayed from the start of the run |
 | `POST /api/analyses/:id/questions` | Answers a question against a stored analysis |
 | `GET /api/analyses/:id/evidence/:evidenceId` | One evidence item, its source text, and the excerpt's offsets |

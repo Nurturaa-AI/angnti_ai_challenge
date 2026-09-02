@@ -7,6 +7,65 @@ All notable changes to Repo Archaeologist. Format loosely follows
 
 Nothing yet. See [`## Next`](#next) for what the following iteration has to address.
 
+## [0.6.2] — 2026-09-02
+
+**A record was deleted out from under the run that owned it.**
+
+A real `pnpm web` session produced seven lines for one analysis:
+
+```
+analysis an-mtjkeuuv-1 phase synthesizing not recorded: StorageError: No analysis an-mtjkeuuv-1
+… four more phases …
+analysis an-mtjkeuuv-1 failed: StorageError: No analysis an-mtjkeuuv-1
+analysis an-mtjkeuuv-1 could not be marked failed: StorageError: No analysis an-mtjkeuuv-1
+```
+
+The row *was* created and committed — the shape of the log proves it, since a create that never
+landed would have failed at `validating`, not at `synthesizing`. It was `DELETE
+/api/analyses/:id`, on an analysis that was still running. `0.6.0` detached the run from the request
+that started it and gave the delete route no way to know that. Nothing in 644 tests covered `DELETE`
+at all, and every store test ran against `:memory:`.
+
+### Fixed — the record's lifetime now covers its run
+
+- **A delete of a running analysis is a cancellation.** `AnalysisRunner` tracks its live ids and
+  exposes `abandon(id)`; `routeDelete` calls it before `store.delete(id)` and answers
+  `{ deleted, cancelled }`. The browser's toast says which happened.
+- **The run stops writing instead of failing seven times.** It checks at each of its own write
+  boundaries, discards its result and logs one line. Cooperative on purpose: the pipeline underneath
+  is *not* interrupted — that would mean reaching into the measured analysis path — so an in-flight
+  model call finishes and its output is dropped.
+- **The record is never recreated.** Resurrecting the row would be the runner overruling the person
+  who deleted it.
+- **`No analysis an-… .` no longer reaches the browser.** The store's internal invariant message was
+  being carried into the record's `error` field by `safeFailureMessage`. A cancelled run now says
+  *"The analysis was deleted while it was running."*
+
+### Changed
+
+- `AnalysisNotFoundError extends StorageError`, thrown by `get`, `update` and `appendQuestion`
+  instead of a bare `StorageError`, and carrying the `analysisId`. The store was **not** weakened —
+  a missing row is still a thrown invariant violation, `update` still never creates a row, and the
+  subclass's `name` stays `"StorageError"` so the HTTP mapping is byte-identical. The subclass
+  exists so the record's owner can tell *"the row I created is gone"* from *"the database is
+  broken"*, which is what lets a run stop on the first observation even when nothing announced the
+  delete.
+
+### Tests
+
+Two new files, 14 tests, both against the real `SqliteAnalysisStore` on a real file:
+
+- [`packages/app/test/persistence.test.ts`](packages/app/test/persistence.test.ts) — durability
+  across close/reopen, a detached run continuing after `start()` returns, delete-while-running both
+  announced and unannounced, and the missing-analysis invariant still holding.
+- [`apps/web/test/durability.test.ts`](apps/web/test/durability.test.ts) — a real server on a real
+  socket: POST → completion → **restart the process** → still readable; and a mid-run DELETE that
+  leaves no storage error in the log.
+
+Both fail against the pre-fix code with the reported symptom. 658 tests pass; `verify:measured`
+reports no change under the measured path, and `ADVANCED_VERSION` / `BASELINE_VERSION` are
+unchanged because the analysis itself was not touched.
+
 ## [0.6.1] — 2026-09-02
 
 Iteration 5, continued: **the browser did not load.**
@@ -1038,3 +1097,23 @@ metric's:
    three things would be worth more than another fifty unit tests, and it is the first product-layer
    item the next iteration should weigh — against the fact that it is the project's first
    heavyweight dev dependency, which is not a small thing to spend.
+
+8. **A cancelled run still finishes its pipeline.** `0.6.2` made a delete stop the *persistence* of
+   a running analysis, which is the half that was corrupting state. The model calls already issued
+   still complete, and their output is thrown away — wasted tokens and, with a slow provider, a
+   worker busy for a minute on a result nobody will see. Interrupting the pipeline itself means
+   threading an `AbortSignal` through `analyzeRepository` into the tool loop, which is the measured
+   path; it is a real improvement and it is not a lifecycle fix, so it belongs to an iteration that
+   is allowed to re-measure.
+
+9. **The mid-run delete has never been raced against a real provider.** It is proven over a real
+   socket against a real database file, and against the mock, which finishes too fast to race. The
+   original log came from `gemini-3.5-flash`, and reproducing the *original* conditions needs an API
+   key this environment does not have. Worth doing once, deliberately, next time a paid run happens
+   anyway.
+
+10. **The delete confirmation focuses the destructive button.** `app.js` swaps the delete control for
+    a two-step confirm and moves focus to *"Delete for good"*, so a stray Enter after clicking
+    Delete destroys the analysis. Correct for a keyboard user reaching the confirm deliberately,
+    wrong as a default. Left alone in `0.6.2` because it is unrelated to the lifecycle bug and
+    changing focus behaviour without a test that renders the page is how `0.6.0` happened.
