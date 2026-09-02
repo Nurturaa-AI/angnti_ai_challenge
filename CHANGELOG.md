@@ -7,6 +7,108 @@ All notable changes to Repo Archaeologist. Format loosely follows
 
 Nothing yet. See [`## Next`](#next) for what the following iteration has to address.
 
+## [0.6.1] — 2026-09-02
+
+Iteration 5, continued: **the browser did not load.**
+
+`0.6.0` shipped `app.js` with a `SyntaxError` in it. Three functions — `layoutGraph`, `truncate`,
+`countOmittedClaims` — were extracted into `ui.js`, imported back at the top of `app.js`, and never
+deleted from the bottom. A duplicate `const` at module scope is not a warning; the module never
+evaluates. Every claim `0.6.0` made about the dashboard was a claim about a file the browser
+refused to run.
+
+The tests did not catch it and could not have. `ui.test.ts` asserted fifty things about `ui.js` and
+all fifty were true. Nothing in it, or in the 570 tests around it, ever asked whether `app.js`
+parses.
+
+This entry replaces no text in [`0.6.0`](#060--2026-09-02). Corrections are additive here, which is
+the only way a changelog stays evidence rather than marketing — the claims below are what was
+actually wrong with it.
+
+### Fixed — the dashboard runs
+
+- **`app.js` parses.** The three duplicated declarations are gone, so the imported — and tested —
+  versions are the ones that execute.
+- **`#announce` and `#alert` exist.** `toast()` carried a ten-line comment explaining why an error
+  goes to `role="alert"` and everything else to `role="status"`, and then wrote to two elements that
+  were never in `index.html`. Every status message in `0.6.0` would have thrown a `TypeError` on the
+  first line that reached the live region — including the ones reporting a failure.
+- **`#progress` exists, and has a rule.** The phase panel — a deliverable of `0.6.0` — had no host
+  element and no CSS. `renderProgress` took its `if (!host) return` branch on every call, so live
+  progress arrived over SSE, updated the state and painted nothing. The host is deliberately
+  outside `<main>`, because `render()` clears `#main` on every section change.
+- **Eleven imported helpers are now called.** `architectureOutline`, `nodeDetail`, `edgeDetail`,
+  `filterGraph`, `nodeMatchesSearch`, `relatedNodeIds`, `graphSummaryLabel`, `phaseChecklist`,
+  `questionOutcome`, `evidenceLineRange`, `evidenceStrength` — imported, tested, and unreachable.
+  They are precisely the logic behind clicking a node, clicking an edge, the outline view, the phase
+  panel and the three question states. The features existed as pure functions with passing tests and
+  no caller. `absoluteTime` was the exception and was removed: `describeAnalysisRow` already formats
+  it, so importing it was the redundant half of the same mistake.
+- **`state.graph.selected` matches its own comment.** Documented as `{ kind, id }` because an edge is
+  selectable too, used as a bare node id. Now the documented shape, and an edge selection opens a
+  panel naming its relationship and both endpoints rather than the address of a line.
+- **`state.drawerReturn` is used.** Declared, commented, never written. Closing the evidence drawer
+  dropped focus to the top of the document; it now returns to the chip that opened it.
+- **The recent-analyses list is styled.** Eleven classes arrived with the durable store — the row,
+  the name, the path, the summary, the provenance line, both delete states — and none of them had a
+  rule. Neither did `.pill`, so every status in the product rendered as unstyled inline text, in the
+  one iteration whose whole point was that an analysis now has a status worth reading. The surviving
+  `.recent button.on` rule pointed at a structure that no longer existed.
+- **`--ink-faint` meets AA.** `#5f6b7a` computes to 2.99:1 on `--panel`, against a 4.5:1 floor, and
+  it styles the 10px provenance labels. Now `#7d8895` — 4.50:1 on `--panel`, 5.25:1 on `--bg`.
+- **The browser is off the Iteration 4 aliases.** The PDF download was the last route still on
+  `/api/analysis/:id/…`. The aliases stay on the server so Iteration 4's tests keep passing
+  unmodified; nothing in the browser reaches for them.
+- **The sidebar stopped lying.** It read "Analyses are held in memory. Restarting the server clears
+  them" — written for Iteration 4 and left in place by the iteration that made it false.
+
+### Added — `apps/web/test/wiring.test.ts`, the kind of test that was missing
+
+24 tests, 620 → **644**. Not more coverage of the same kind; a different kind. A unit test imports a
+module and proves the module works — nothing in it can prove the module is *reached*. These read the
+shipped files as text and assert the seams between them:
+
+- `app.js` and `ui.js` parse as ES modules (`node --check`, zero dependencies), which is the check
+  that would have caught the failure outright.
+- No imported name is also declared locally — the bug itself.
+- No imported name is unused — its other half, and the one that hid eleven working features.
+- Every `$("id")` resolves to an element `index.html` or `app.js` creates, with `#announce`,
+  `#alert`, `#status`, `#progress`, `#main` and `#drawer` named explicitly because their absence is
+  silent, plus an assertion that the progress host precedes `#main` in the document.
+- Every class the app applies has a rule, and every custom property it reads is defined.
+- The browser addresses evidence only as `/api/analyses/:id/evidence/:evidenceId`, never through a
+  global endpoint, and never names `repositoryRoot`, `trajectory` or `apiKey`.
+
+### Added — `scripts/verify-measured-path.ts`
+
+Every iteration since the first has carried forward a benchmark number by arguing the measured path
+did not change. This makes the argument a command with an exit code: `pnpm verify:measured --ref
+<ref>` reports what differs under `advanced/src`, `baseline/src`, `evaluation/`, `packages/evaluator`
+and `fixtures`, fails on any deletion or any change to a frozen directory, checks whether
+`ADVANCED_VERSION` / `BASELINE_VERSION` moved, and `--compare a.json b.json` normalizes two result
+files down to what the systems actually answered and diffs them.
+
+### Measurement
+
+No product change here can move a benchmark, and none is claimed. What is checked is that it did not
+move anything:
+
+| | Baseline `--mock` | Advanced `--mock` |
+| --- | --- | --- |
+| Run id | `eval-baseline-2026-09-02T03-07-29Z` | `eval-advanced-2026-09-02T03-07-44Z` |
+| Evidence-backed task accuracy | 21.4 % (3/14) | 28.6 % (4/14) |
+| Normalized JSON diff vs the pre-Iteration-5 runs | **identical** | **identical** |
+
+`pnpm verify:measured --ref bd5c632` reports `advanced/src/index.ts +40 −0`,
+`baseline/src/index.ts +17 −0`, both version constants unmoved, and nothing at all under
+`evaluation/`, `packages/evaluator/` or `fixtures/`. Those 57 lines are `0.6.0`'s `onPhase` callback
+and its phase unions, unchanged by this entry. `pnpm typecheck` clean, 644 tests passing, offline.
+
+### Versioning
+
+Root `0.6.0` → `0.6.1`. `ADVANCED_VERSION` / `BASELINE_VERSION` stay at `0.1.0`: nothing on the
+measured path was touched, and `verify:measured` says so rather than a paragraph asserting it.
+
 ## [0.6.0] — 2026-09-02
 
 Iteration 5: **somewhere for an analysis to live.** A durable store behind the `AnalysisStore` seam
@@ -866,9 +968,10 @@ nothing in this release claims the results are good.
 
 ## Next
 
-Iteration 5 closed item 5 and sharpened item 3. Items 1, 2 and 4 are carried forward unchanged in
-substance, because nothing in Iteration 5 addressed them — it was a durability iteration, measured
-against the claim that it left the pipeline alone.
+`0.6.1` added item 7 and closed the narrowest part of it. Iteration 5 closed item 5 and sharpened
+item 3. Items 1, 2 and 4 are carried forward unchanged in substance, because nothing in Iteration 5
+addressed them — it was a durability iteration, measured against the claim that it left the pipeline
+alone.
 
 1. **Grow the dataset. This is blocking, and has been for two iterations.**
    `gemini-3.5-flash-lite` is at 14/14, so the primary metric has no headroom left on this dataset
@@ -922,3 +1025,16 @@ metric's:
    number of analyses is unbounded by design, because a tool that silently discards the analysis you
    wanted is worse than one whose file grows. A retention policy is a decision for whoever has too
    many, not a default worth guessing at.
+7. **No test has ever rendered the dashboard.** `0.6.1` closed the cheap half of this: the shipped
+   files are now checked for the failures that need no DOM — does `app.js` parse, is every import
+   reached, does every id have a host, does every class have a rule. That is enough to catch the
+   whole class of defect that shipped in `0.6.0`, and it is not enough to catch the next one. Nothing
+   verifies that clicking a node opens the panel, that Escape returns focus to the chip that opened
+   the drawer, or that a phase event repaints the checklist — the interactions the last two
+   iterations were mostly *about*. The reason is a real trade: the project has no bundler and no
+   jsdom, and `ui.js` exists precisely so the decisions can be tested without a document. But
+   "testable in principle" was exactly the state eleven unreachable helpers were in. A single
+   headless-browser smoke test that loads the page, runs one analysis against a fixture and clicks
+   three things would be worth more than another fifty unit tests, and it is the first product-layer
+   item the next iteration should weigh — against the fact that it is the project's first
+   heavyweight dev dependency, which is not a small thing to spend.

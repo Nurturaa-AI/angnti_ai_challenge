@@ -28,7 +28,6 @@ import {
   NODE_COLOURS,
   SECTIONS,
   UNSUPPORTED_NOTICE,
-  absoluteTime,
   architectureOutline,
   countOmittedClaims,
   defaultGraphView,
@@ -36,6 +35,7 @@ import {
   duration,
   edgeDetail,
   evidenceLineRange,
+  evidenceLocationLabel,
   evidenceStrength,
   filterGraph,
   fmt,
@@ -588,11 +588,10 @@ async function refreshAfterTerminal(id) {
  * without having to go looking for it.
  */
 function renderProgress() {
+  // The host is static in `index.html`, outside `<main>`, precisely so that `render()`
+  // clearing the section body cannot take the progress panel with it.
   const host = $("progress");
-  if (!host) {
-    render();
-    return;
-  }
+  if (!host) return;
   clear(host);
   const progress = state.progress;
   if (progress === null) {
@@ -855,88 +854,21 @@ function renderOverview(analysis) {
 
 // ------------------------------------------------------------- architecture
 
+/**
+ * The architecture section: two views over one graph.
+ *
+ * The diagram is the default on a wide screen with a graph small enough to read; the
+ * outline is the default otherwise, and either is always one click away. Both are built
+ * from the same server-side `ReportGraph` — `architectureOutline` and `layoutGraph` are
+ * two projections of it, not two traversals — so they cannot disagree about what the
+ * repository contains. The filters and the search apply to both.
+ */
 function renderArchitecture(analysis) {
   const graph = analysis.graph;
   const summary = graph.summary;
+  const outline = state.graph.view === "outline";
 
-  const canvas = el("div", { class: "canvas" });
-  const controls = el(
-    "div",
-    { class: "graph-controls" },
-    el("input", {
-      type: "search",
-      id: "graph-search",
-      placeholder: "search nodes…",
-      value: state.graph.search,
-      oninput: (event) => {
-        state.graph.search = event.target.value.trim().toLowerCase();
-        paintGraph();
-      },
-    }),
-    el("button", { type: "button", class: "ghost", text: "Fit", onclick: () => fitGraph(canvas) }),
-    el("button", {
-      type: "button",
-      class: "ghost",
-      text: "Zoom in",
-      onclick: () => zoomGraph(1.2, canvas),
-    }),
-    el("button", {
-      type: "button",
-      class: "ghost",
-      text: "Zoom out",
-      onclick: () => zoomGraph(1 / 1.2, canvas),
-    }),
-    el("button", {
-      type: "button",
-      class: "ghost",
-      text: "Clear selection",
-      onclick: () => {
-        state.graph.selected = null;
-        paintGraph();
-        renderSelection();
-      },
-    }),
-  );
-
-  const typeFilters = el(
-    "div",
-    { class: "filter-group" },
-    el("span", { text: "Types" }),
-    Object.entries(summary.nodesByType).map(([type, count]) =>
-      el("button", {
-        type: "button",
-        class: `chip-toggle${state.graph.hiddenTypes.has(type) ? "" : " on"}`,
-        text: `${type} ${count}`,
-        onclick: (event) => {
-          toggle(state.graph.hiddenTypes, type);
-          event.target.classList.toggle("on");
-          drawGraph(canvas, analysis);
-        },
-      }),
-    ),
-  );
-
-  const relationshipFilters = el(
-    "div",
-    { class: "filter-group" },
-    el("span", { text: "Edges" }),
-    Object.entries(summary.edgesByRelationship).map(([relationship, count]) =>
-      el("button", {
-        type: "button",
-        class: `chip-toggle${state.graph.hiddenRelationships.has(relationship) ? "" : " on"}`,
-        text: `${relationship} ${count}`,
-        onclick: (event) => {
-          toggle(state.graph.hiddenRelationships, relationship);
-          event.target.classList.toggle("on");
-          drawGraph(canvas, analysis);
-        },
-      }),
-    ),
-  );
-
-  const selection = el("div", { id: "selection" });
-
-  const nodes = [
+  const parts = [
     head(
       "Architecture",
       `${summary.nodeCount} nodes, ${summary.edgeCount} edges. Every one of them carries at least one grounded citation.`,
@@ -949,15 +881,147 @@ function renderArchitecture(analysis) {
             `${summary.nodesSkippedWithoutEvidence} nodes and ${summary.edgesSkippedWithoutEvidence} edges were left out ` +
             "of this diagram because no grounded citation supported them. A diagram is a claim like any other.",
         }),
+    viewToggle(analysis),
+    outline && summary.nodeCount > LARGE_GRAPH_NODES
+      ? el("p", {
+          class: "hint",
+          text:
+            `This graph has more than ${LARGE_GRAPH_NODES} nodes, so it opens as an outline — a layered diagram of ` +
+            "that many boxes is a wall, not a picture. The diagram is still one click away.",
+        })
+      : null,
+    graphFilters(analysis),
+  ];
+
+  parts.push(...(outline ? outlineView(analysis) : diagramView(analysis)));
+  parts.push(el("div", { id: "selection" }));
+  return parts;
+}
+
+/** Diagram or outline. `aria-pressed` rather than a class, so the state is announced. */
+function viewToggle(analysis) {
+  const button = (view, label) =>
+    el("button", {
+      type: "button",
+      text: label,
+      "aria-pressed": state.graph.view === view ? "true" : "false",
+      onclick: () => {
+        if (state.graph.view === view) return;
+        state.graph.view = view;
+        render();
+      },
+    });
+  return el(
+    "div",
+    { class: "graph-controls" },
+    el("div", { class: "view-toggle" }, button("diagram", "Diagram"), button("outline", "Outline")),
+    el("span", { class: "sr-only", text: graphSummaryLabel(analysis.graph) }),
+  );
+}
+
+/**
+ * Search and the two filter groups.
+ *
+ * Search only ever changes classes — `repaintGraph` toggles them on whichever view is
+ * mounted — so a keystroke never rebuilds the container the search box lives in and the
+ * caret stays where the user put it. A type or relationship filter changes which nodes
+ * exist at all, so those do rebuild the view; the chips themselves sit outside it, which
+ * is why the button keeps focus across the rebuild.
+ */
+function graphFilters(analysis) {
+  const summary = analysis.graph.summary;
+
+  const search = el(
+    "div",
+    { class: "graph-controls" },
+    el("label", { class: "sr-only", for: "graph-search", text: "Search nodes" }),
+    el("input", {
+      type: "search",
+      id: "graph-search",
+      placeholder: "search nodes…",
+      value: state.graph.search,
+      oninput: (event) => {
+        state.graph.search = event.target.value.trim().toLowerCase();
+        repaintGraph();
+      },
+    }),
+    el("button", {
+      type: "button",
+      class: "ghost",
+      text: "Clear selection",
+      onclick: () => {
+        state.graph.selected = null;
+        repaintGraph();
+        renderSelection();
+      },
+    }),
+  );
+
+  const group = (label, counts, hidden, rebuild) =>
+    el(
+      "div",
+      { class: "filter-group" },
+      el("span", { text: label }),
+      Object.entries(counts).map(([key, count]) =>
+        el("button", {
+          type: "button",
+          class: `chip-toggle${hidden.has(key) ? "" : " on"}`,
+          "aria-pressed": hidden.has(key) ? "false" : "true",
+          text: `${key} ${count}`,
+          onclick: (event) => {
+            toggle(hidden, key);
+            event.currentTarget.classList.toggle("on");
+            event.currentTarget.setAttribute("aria-pressed", hidden.has(key) ? "false" : "true");
+            rebuild();
+          },
+        }),
+      ),
+    );
+
+  const rebuild = () => rebuildGraphView(analysis);
+  return el(
+    "div",
+    {},
+    search,
+    group("Types", summary.nodesByType, state.graph.hiddenTypes, rebuild),
+    group("Edges", summary.edgesByRelationship, state.graph.hiddenRelationships, rebuild),
+  );
+}
+
+/** The visible subgraph: the filters applied, and nothing else decided here. */
+function visibleGraph(analysis) {
+  return filterGraph(analysis.graph, state.graph.hiddenTypes, state.graph.hiddenRelationships);
+}
+
+function diagramView(analysis) {
+  const canvas = el("div", { class: "canvas" });
+  const controls = el(
+    "div",
+    { class: "graph-controls" },
+    el("button", { type: "button", class: "ghost", text: "Fit", onclick: () => fitGraph(canvas) }),
+    el("button", { type: "button", class: "ghost", text: "Zoom in", onclick: () => zoomGraph(1.2, canvas) }),
+    el("button", { type: "button", class: "ghost", text: "Zoom out", onclick: () => zoomGraph(1 / 1.2, canvas) }),
+  );
+
+  // The SVG needs the element measured, so draw after this frame is in the document.
+  requestAnimationFrame(() => {
+    drawGraph(canvas, analysis);
+    fitGraph(canvas);
+  });
+
+  return [
     controls,
-    typeFilters,
-    relationshipFilters,
     canvas,
-    el("p", { class: "hint", text: "Drag to pan, scroll to zoom, click a node to select it and dim everything unrelated." }),
+    el("p", {
+      class: "hint",
+      text:
+        "Drag to pan, scroll to zoom. Click a node or an edge to select it and dim everything unrelated. " +
+        "Tab reaches every node and edge, and Enter selects the focused one.",
+    }),
     el(
       "div",
       { class: "legend" },
-      Object.keys(summary.nodesByType).map((type) =>
+      Object.keys(analysis.graph.summary.nodesByType).map((type) =>
         // The swatch is an SVG rect, not a styled box: `fill` is a presentation
         // attribute, so the palette can stay in `NODE_COLOURS` and the legend draws
         // literally the same mark as the bar on a node.
@@ -966,28 +1030,129 @@ function renderArchitecture(analysis) {
           {},
           svgEl(
             "svg",
-            { class: "swatch", width: "8", height: "8", viewBox: "0 0 8 8" },
+            { class: "swatch", width: "8", height: "8", viewBox: "0 0 8 8", "aria-hidden": "true" },
             svgEl("rect", { width: "8", height: "8", rx: "2", fill: NODE_COLOURS[type] ?? "#8b949e" }),
           ),
           type,
         ),
       ),
     ),
-    selection,
   ];
+}
 
-  // The SVG needs the element measured, so draw after this frame is in the document.
-  requestAnimationFrame(() => {
-    drawGraph(canvas, analysis);
-    fitGraph(canvas);
-  });
+/**
+ * The architecture as a list: Node, Type, Relationships, Evidence.
+ *
+ * The non-visual fallback the specification requires, and the narrow-screen view. Every
+ * row carries the same four things a node click shows in the diagram, and the evidence
+ * ids are the same buttons — so a reader who never sees the picture loses the layout and
+ * nothing else.
+ */
+function outlineView(analysis) {
+  const host = el("div", { id: "outline-host" });
+  const list = buildOutline(analysis);
+  host.append(list);
+  return [host];
+}
 
-  return nodes;
+function buildOutline(analysis) {
+  const visible = visibleGraph(analysis);
+  const rows = architectureOutline(visible);
+
+  if (rows.length === 0) {
+    return el("p", { class: "hint pad", id: "outline", text: "Every node type is filtered out." });
+  }
+
+  return el(
+    "ul",
+    { class: "outline", id: "outline" },
+    rows.map((row) =>
+      el(
+        "li",
+        { "data-node": row.id },
+        el(
+          "div",
+          { class: "outline-head" },
+          el("button", {
+            type: "button",
+            class: "label link",
+            text: row.label,
+            "aria-pressed": isSelected("node", row.id) ? "true" : "false",
+            onclick: () => selectGraphItem("node", row.id),
+          }),
+          el("span", { class: "tag", text: row.type }),
+          row.path === null ? null : el("span", { class: "path mono", text: row.path }),
+        ),
+        el("p", { class: "prose", text: row.description }),
+        el(
+          "dl",
+          {},
+          el("dt", { text: "From claim" }),
+          el("dd", { class: "mono", text: row.claimId }),
+          el("dt", { text: `Relationships (${row.relationships.length})` }),
+          el(
+            "dd",
+            {},
+            row.relationships.length === 0
+              ? el("span", { class: "hint", text: "none in the filtered view" })
+              : el(
+                  "ul",
+                  { class: "plain" },
+                  row.relationships.map((rel) =>
+                    el(
+                      "li",
+                      { class: "rel" },
+                      el("span", { class: "tag", text: rel.relationship }),
+                      " ",
+                      el("button", {
+                        type: "button",
+                        class: "link",
+                        text: rel.phrase,
+                        onclick: () => selectGraphItem("edge", rel.edgeId),
+                      }),
+                      evidenceRow(rel.evidenceIds),
+                    ),
+                  ),
+                ),
+          ),
+          el("dt", { text: "Evidence" }),
+          el("dd", {}, evidenceRow(row.evidenceIds)),
+        ),
+      ),
+    ),
+  );
 }
 
 function toggle(set, value) {
   if (set.has(value)) set.delete(value);
   else set.add(value);
+}
+
+function isSelected(kind, id) {
+  const selected = state.graph.selected;
+  return selected !== null && selected.kind === kind && selected.id === id;
+}
+
+/** One place decides what selecting something means, so both views agree. */
+function selectGraphItem(kind, id) {
+  state.graph.selected = isSelected(kind, id) ? null : { kind, id };
+  repaintGraph();
+  renderSelection();
+}
+
+/** A filter changed the set of nodes, so whichever view is mounted is rebuilt. */
+function rebuildGraphView(analysis) {
+  const canvas = document.querySelector(".canvas");
+  if (canvas) {
+    drawGraph(canvas, analysis);
+    return;
+  }
+  const host = $("outline-host");
+  if (host) {
+    clear(host);
+    host.append(buildOutline(analysis));
+    repaintGraph();
+  }
 }
 
 function resetGraphView() {
@@ -1001,83 +1166,8 @@ function resetGraphView() {
   state.graph.laidOut = null;
 }
 
-/**
- * Layered layout, computed here rather than on the server.
- *
- * The graph model is semantic on purpose — nodes, edges, relationships, evidence — and
- * pixels are a property of a viewport, not of a repository. Depth is the longest path
- * from a node with no incoming edge, which for an architecture graph puts the entry
- * points on the left and what they depend on to the right. Within a layer, nodes keep
- * the order the server emitted, so the picture is stable across reloads: the same
- * analysis always draws the same diagram.
- */
-function layoutGraph(nodes, edges) {
-  const byId = new Map(nodes.map((node) => [node.id, node]));
-  const incoming = new Map(nodes.map((node) => [node.id, []]));
-  const outgoing = new Map(nodes.map((node) => [node.id, []]));
-  for (const edge of edges) {
-    if (!byId.has(edge.from) || !byId.has(edge.to)) continue;
-    outgoing.get(edge.from).push(edge.to);
-    incoming.get(edge.to).push(edge.from);
-  }
-
-  const depth = new Map();
-  const visiting = new Set();
-  const depthOf = (id) => {
-    if (depth.has(id)) return depth.get(id);
-    // A cycle is legal in an architecture graph; treat the back edge as depth 0.
-    if (visiting.has(id)) return 0;
-    visiting.add(id);
-    let value = 0;
-    for (const parent of incoming.get(id) ?? []) value = Math.max(value, depthOf(parent) + 1);
-    visiting.delete(id);
-    depth.set(id, value);
-    return value;
-  };
-  for (const node of nodes) depthOf(node.id);
-
-  const layers = [];
-  for (const node of nodes) {
-    const level = depth.get(node.id) ?? 0;
-    (layers[level] ??= []).push(node);
-  }
-
-  const NODE_W = 168;
-  const NODE_H = 44;
-  const GAP_X = 92;
-  const GAP_Y = 20;
-
-  const placed = new Map();
-  const tallest = Math.max(1, ...layers.map((layer) => (layer ? layer.length : 0)));
-  const height = tallest * (NODE_H + GAP_Y) + 40;
-
-  layers.forEach((layer, level) => {
-    if (!layer) return;
-    const columnHeight = layer.length * (NODE_H + GAP_Y);
-    const top = (height - columnHeight) / 2;
-    layer.forEach((node, index) => {
-      placed.set(node.id, {
-        node,
-        x: 24 + level * (NODE_W + GAP_X),
-        y: top + index * (NODE_H + GAP_Y),
-        w: NODE_W,
-        h: NODE_H,
-      });
-    });
-  });
-
-  const width = 48 + layers.length * (NODE_W + GAP_X);
-  return { placed, width, height, layerCount: layers.length };
-}
-
 function drawGraph(canvas, analysis) {
-  const graph = analysis.graph;
-  const nodes = graph.nodes.filter((node) => !state.graph.hiddenTypes.has(node.type));
-  const visible = new Set(nodes.map((node) => node.id));
-  const edges = graph.edges.filter(
-    (edge) =>
-      !state.graph.hiddenRelationships.has(edge.relationship) && visible.has(edge.from) && visible.has(edge.to),
-  );
+  const { nodes, edges } = visibleGraph(analysis);
 
   const layout = layoutGraph(nodes, edges);
   state.graph.laidOut = { layout, edges, nodes };
@@ -1114,20 +1204,54 @@ function drawGraph(canvas, analysis) {
     const x2 = to.x;
     const y2 = to.y + to.h / 2;
     const midX = (x1 + x2) / 2;
+    const geometry =
+      x2 >= x1
+        ? `M${x1},${y1} C${midX},${y1} ${midX},${y2} ${x2},${y2}`
+        : // A back edge would otherwise be drawn straight through the nodes between.
+          `M${x1},${y1} C${x1 + 60},${y1 - 46} ${x2 - 60},${y2 - 46} ${x2},${y2}`;
     const path = svgEl("path", {
       class: "edge",
       "data-edge": edge.id,
       "data-from": edge.from,
       "data-to": edge.to,
       "marker-end": "url(#arrow)",
-      d:
-        x2 >= x1
-          ? `M${x1},${y1} C${midX},${y1} ${midX},${y2} ${x2},${y2}`
-          : // A back edge would otherwise be drawn straight through the nodes between.
-            `M${x1},${y1} C${x1 + 60},${y1 - 46} ${x2 - 60},${y2 - 46} ${x2},${y2}`,
+      d: geometry,
     });
     path.append(svgEl("title", { text: `${edge.relationship}: ${edge.description}` }));
     edgeLayer.append(path);
+
+    /*
+     * The click and focus target for the edge.
+     *
+     * A one-pixel curve is not something anyone can reliably hit with a pointer, and it
+     * is not something a keyboard can reach at all. This is the same curve drawn wide and
+     * transparent: it takes the pointer and the tab stop, while the visible path above
+     * stays thin. `pointer-events: stroke` means only the ribbon along the line is live,
+     * not the whole bounding box, so it never steals a click meant for a node.
+     */
+    const hit = svgEl("path", {
+      class: "edge-hit",
+      "data-edge-hit": edge.id,
+      d: geometry,
+      fill: "none",
+      stroke: "transparent",
+      "stroke-width": "14",
+      "pointer-events": "stroke",
+      role: "button",
+      tabindex: "0",
+      "aria-label": `${labelOf(nodes, edge.from)} ${edge.relationship} ${labelOf(nodes, edge.to)}`,
+      onclick: (event) => {
+        event.stopPropagation();
+        selectGraphItem("edge", edge.id);
+      },
+      onkeydown: (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        event.stopPropagation();
+        selectGraphItem("edge", edge.id);
+      },
+    });
+    edgeLayer.append(hit);
     edgeLayer.append(
       svgEl("text", {
         class: "edge-label",
@@ -1147,11 +1271,24 @@ function drawGraph(canvas, analysis) {
       class: "node",
       "data-node": node.id,
       transform: `translate(${box.x},${box.y})`,
+      // A diagram a keyboard cannot reach is a picture of an architecture, not a view of
+      // one. `role="button"` plus `tabindex` puts every node in the tab order and in the
+      // accessibility tree; `aria-label` is what a screen reader reads instead of the
+      // three lines of SVG text, and `paintDiagram` keeps `aria-pressed` in step.
+      role: "button",
+      tabindex: "0",
+      "aria-pressed": "false",
+      "aria-label": `${node.label}, ${node.type}${node.path === null || node.path === undefined ? "" : `, ${node.path}`}`,
       onclick: (event) => {
         event.stopPropagation();
-        state.graph.selected = state.graph.selected === node.id ? null : node.id;
-        paintGraph();
-        renderSelection();
+        selectGraphItem("node", node.id);
+      },
+      onkeydown: (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        // Space scrolls a page by default, and this one is a viewport.
+        event.preventDefault();
+        event.stopPropagation();
+        selectGraphItem("node", node.id);
       },
     });
     group.append(
@@ -1167,7 +1304,7 @@ function drawGraph(canvas, analysis) {
   viewport.addEventListener("click", () => {
     if (state.graph.selected !== null) {
       state.graph.selected = null;
-      paintGraph();
+      repaintGraph();
       renderSelection();
     }
   });
@@ -1175,12 +1312,12 @@ function drawGraph(canvas, analysis) {
   attachPanZoom(viewport, canvas);
   canvas.append(viewport);
   applyTransform(canvas);
-  paintGraph();
+  repaintGraph();
 }
 
-function truncate(value, max) {
-  const text = String(value ?? "");
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+/** A node's label for an accessible name, falling back to its id. */
+function labelOf(nodes, id) {
+  return nodes.find((node) => node.id === id)?.label ?? id;
 }
 
 function attachPanZoom(viewport, canvas) {
@@ -1251,96 +1388,194 @@ function applyTransform(canvas) {
   }
 }
 
-/** Selection and search only change classes — the layout is never recomputed for them. */
-function paintGraph() {
+/**
+ * Selection and search change classes and nothing else.
+ *
+ * The layout is never recomputed for them, which is what keeps a selection from moving
+ * the diagram under the cursor. `repaintGraph` is the entry point both views share: the
+ * work is the same question — what is related to the selection, and what matches the
+ * search — asked of an SVG in one case and a list in the other.
+ */
+function repaintGraph() {
+  paintDiagram();
+  paintOutline();
+}
+
+/** The ids a selection keeps lit, whether a node or an edge is selected. */
+function relatedToSelection(edges) {
   const selected = state.graph.selected;
-  const search = state.graph.search;
+  if (selected === null) return null;
+  if (selected.kind === "node") return relatedNodeIds(edges, selected.id);
+  const edge = edges.find((candidate) => candidate.id === selected.id);
+  return new Set(edge ? [edge.from, edge.to] : []);
+}
+
+function paintDiagram() {
   const laidOut = state.graph.laidOut;
   if (!laidOut) return;
-
-  const related = new Set();
-  if (selected) {
-    related.add(selected);
-    for (const edge of laidOut.edges) {
-      if (edge.from === selected) related.add(edge.to);
-      if (edge.to === selected) related.add(edge.from);
-    }
-  }
+  const selected = state.graph.selected;
+  const search = state.graph.search;
+  const related = relatedToSelection(laidOut.edges);
 
   for (const group of document.querySelectorAll(".node")) {
     const id = group.dataset.node;
     const node = laidOut.nodes.find((candidate) => candidate.id === id);
-    const matches =
-      search !== "" &&
-      node &&
-      `${node.label} ${node.type} ${node.path ?? ""} ${node.description}`.toLowerCase().includes(search);
-    group.classList.toggle("selected", id === selected);
-    group.classList.toggle("match", Boolean(matches));
-    group.classList.toggle("dim", (selected !== null && !related.has(id)) || (search !== "" && !matches));
+    const matches = node !== undefined && nodeMatchesSearch(node, search);
+    const isSel = isSelected("node", id);
+    group.classList.toggle("selected", isSel);
+    group.classList.toggle("match", matches);
+    group.classList.toggle("dim", (related !== null && !related.has(id)) || (search !== "" && !matches));
+    group.setAttribute("aria-pressed", isSel ? "true" : "false");
   }
 
   for (const path of document.querySelectorAll(".edge")) {
-    const touches = selected !== null && (path.dataset.from === selected || path.dataset.to === selected);
-    path.classList.toggle("related", touches);
-    path.classList.toggle("dim", selected !== null && !touches);
+    const id = path.dataset.edge;
+    const touches =
+      related !== null && (related.has(path.dataset.from) || related.has(path.dataset.to));
+    const isSel = isSelected("edge", id);
+    path.classList.toggle("selected", isSel);
+    path.classList.toggle("related", touches && !isSel);
+    path.classList.toggle("dim", selected !== null && !touches && !isSel);
+  }
+
+  // The visible path shows the state; the hit path is the thing in the accessibility
+  // tree, so it is the one that has to report it.
+  for (const hit of document.querySelectorAll(".edge-hit")) {
+    hit.setAttribute("aria-pressed", isSelected("edge", hit.dataset.edgeHit) ? "true" : "false");
   }
 }
 
+function paintOutline() {
+  const list = $("outline");
+  if (!list) return;
+  const analysis = state.analysis;
+  if (!analysis) return;
+  const visible = visibleGraph(analysis);
+  const search = state.graph.search;
+  const related = relatedToSelection(visible.edges);
+
+  for (const row of list.querySelectorAll("li[data-node]")) {
+    const id = row.dataset.node;
+    const node = visible.nodes.find((candidate) => candidate.id === id);
+    const matches = node !== undefined && nodeMatchesSearch(node, search);
+    row.classList.toggle("dim", (related !== null && !related.has(id)) || (search !== "" && !matches));
+  }
+  for (const button of list.querySelectorAll('button[aria-pressed]')) {
+    const id = button.closest("li[data-node]")?.dataset.node;
+    if (id !== undefined) button.setAttribute("aria-pressed", isSelected("node", id) ? "true" : "false");
+  }
+}
+
+/**
+ * The detail panel for whatever is selected.
+ *
+ * A node and an edge are different claims and get different panels — the specification
+ * asks an edge to name its relationship, both endpoints and its supporting evidence, and
+ * "src/router.ts → src/store.ts" is an address where "HTTP router (api) → record store
+ * (database)" is the claim. `nodeDetail` and `edgeDetail` resolve that; nothing here
+ * walks the graph again.
+ */
 function renderSelection() {
   const host = $("selection");
   if (!host) return;
   clear(host);
   const selected = state.graph.selected;
-  if (!selected || !state.analysis) return;
+  if (selected === null || !state.analysis) return;
+  const graph = state.analysis.graph;
 
-  const node = state.analysis.graph.nodes.find((candidate) => candidate.id === selected);
-  if (!node) return;
-  const edges = state.analysis.graph.edges.filter((edge) => edge.from === selected || edge.to === selected);
+  const panel =
+    selected.kind === "node"
+      ? nodeSelectionPanel(nodeDetail(graph, selected.id))
+      : edgeSelectionPanel(edgeDetail(graph, selected.id));
+  if (panel === null) return;
+  host.append(panel);
+  host.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
 
-  host.append(
+function nodeSelectionPanel(detail) {
+  if (detail === null) return null;
+  const { node, relationships } = detail;
+  return el(
+    "div",
+    { class: "panel" },
+    el("h2", { text: "Selected node" }),
     el(
-      "div",
-      { class: "panel" },
-      el("h2", { text: "Selected node" }),
-      el(
-        "dl",
-        { class: "kv" },
-        el("dt", { text: "Label" }),
-        el("dd", { text: node.label }),
-        el("dt", { text: "Type" }),
-        el("dd", { text: node.type }),
-        el("dt", { text: "Path" }),
-        el("dd", { class: "path", text: node.path ?? "—" }),
-        el("dt", { text: "From claim" }),
-        el("dd", { text: node.claimId }),
-      ),
-      el("p", { text: node.description }),
-      evidenceRow(node.evidenceIds),
-      edges.length === 0
-        ? null
-        : el(
-            "div",
-            {},
-            el("h2", { class: "spaced", text: `Relationships (${edges.length})` }),
-            el(
-              "ul",
-              { class: "plain" },
-              edges.map((edge) =>
-                el(
-                  "li",
-                  {},
-                  el("span", { class: "tag", text: edge.relationship }),
-                  " ",
-                  el("span", { class: "mono", text: `${edge.from} → ${edge.to}` }),
-                  el("div", { text: edge.description }),
-                  evidenceRow(edge.evidenceIds),
-                ),
+      "dl",
+      { class: "kv" },
+      el("dt", { text: "Label" }),
+      el("dd", { text: node.label }),
+      el("dt", { text: "Type" }),
+      el("dd", { text: node.type }),
+      el("dt", { text: "Path" }),
+      el("dd", { class: "path", text: node.path ?? "—" }),
+      el("dt", { text: "From claim" }),
+      el("dd", { class: "mono", text: node.claimId }),
+    ),
+    el("p", { class: "prose", text: node.description }),
+    evidenceRow(node.evidenceIds),
+    relationships.length === 0
+      ? null
+      : el(
+          "div",
+          {},
+          el("h2", { class: "spaced", text: `Relationships (${relationships.length})` }),
+          el(
+            "ul",
+            { class: "plain" },
+            relationships.map((rel) =>
+              el(
+                "li",
+                {},
+                el("span", { class: "tag", text: rel.relationship }),
+                " ",
+                el("button", {
+                  type: "button",
+                  class: "link",
+                  text: rel.phrase,
+                  onclick: () => selectGraphItem("edge", rel.edgeId),
+                }),
+                el("div", { class: "prose", text: rel.description }),
+                evidenceRow(rel.evidenceIds),
               ),
             ),
           ),
-    ),
+        ),
   );
-  host.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function edgeSelectionPanel(detail) {
+  if (detail === null) return null;
+  const { edge, from, to } = detail;
+  const endpoint = (node, id) =>
+    node === null
+      ? el("dd", { class: "mono", text: id })
+      : el(
+          "dd",
+          {},
+          el("button", {
+            type: "button",
+            class: "link",
+            text: `${node.label} (${node.type})`,
+            onclick: () => selectGraphItem("node", node.id),
+          }),
+        );
+  return el(
+    "div",
+    { class: "panel" },
+    el("h2", { text: "Selected relationship" }),
+    el(
+      "dl",
+      { class: "kv" },
+      el("dt", { text: "Relationship" }),
+      el("dd", {}, el("span", { class: "tag", text: edge.relationship })),
+      el("dt", { text: "Source" }),
+      endpoint(from, edge.from),
+      el("dt", { text: "Target" }),
+      endpoint(to, edge.to),
+    ),
+    el("p", { class: "prose", text: edge.description }),
+    evidenceRow(edge.evidenceIds),
+  );
 }
 
 // ---------------------------------------------------------------- sections
@@ -1577,20 +1812,36 @@ function renderQuestions(analysis) {
   return [
     head("Questions", `${analysis.questions.length} asked against this analysis.`),
     form,
+    // A question that failed locally is a state of this page, not of the analysis. It is
+    // shown, and it is never written into the history, because the repository did not say
+    // it. §10: never fabricate an answer to make the UI look successful.
+    state.questionError === null
+      ? null
+      : el(
+          "div",
+          { class: "answer unverified", role: "alert" },
+          el("div", { class: "q", text: "That question could not be answered." }),
+          el("div", { class: "a", text: state.questionError }),
+          el("div", { class: "meta" }, el("span", { class: "pill pill-bad", text: "error" })),
+        ),
     ...analysis.questions
       .slice()
       .reverse()
-      .map((question) =>
-        el(
+      .map((question) => {
+        const outcome = questionOutcome(question);
+        return el(
           "div",
-          { class: `answer${question.supported ? "" : " unverified"}` },
+          { class: `answer${outcome.state === "supported" ? "" : " unverified"}` },
           el("div", { class: "q", text: question.question }),
           el("div", { class: "a", text: question.answer }),
+          outcome.state === "unsupported"
+            ? el("p", { class: "note", text: UNSUPPORTED_NOTICE })
+            : null,
           el(
             "div",
             { class: "meta" },
             el("span", { text: question.id }),
-            el("span", { text: question.supported ? "verified against the repository" : "not verified" }),
+            el("span", { class: `pill pill-${outcome.tone}`, text: outcome.label }),
             el("span", { text: `confidence ${Math.round(question.confidence * 100)}%` }),
             el("span", { text: `${question.metrics.toolCalls} tool calls` }),
             el("span", { text: `${question.metrics.scoutFilesRead} scout reads` }),
@@ -1600,27 +1851,32 @@ function renderQuestions(analysis) {
               : null,
           ),
           evidenceRow(question.citations.map((citation) => citation.id)),
-        ),
-      ),
+        );
+      }),
   ];
 }
 
 async function ask(textarea) {
   const question = textarea.value.trim();
   if (question === "" || state.busy) return;
+  state.questionError = null;
   setBusy(true, "Exploring the repository for an answer…");
   try {
-    await api("/api/questions", {
+    await api(`/api/analyses/${encodeURIComponent(state.analysis.id)}/questions`, {
       method: "POST",
-      body: { analysisId: state.analysis.id, question },
+      body: { question },
     });
     // Re-read the analysis so the ledger, the citation list and the questions all move
     // together. Patching the local copy would let the three drift apart.
-    state.analysis = await api(`/api/analysis/${encodeURIComponent(state.analysis.id)}`);
+    state.analysis = await api(`/api/analyses/${encodeURIComponent(state.analysis.id)}`);
     toast(null);
     render();
   } catch (error) {
+    // Never stored, because it is not something the repository said. It lives on the page
+    // until the next attempt, and it is never dressed up as an answer.
+    state.questionError = error.message;
     toast(error.message, "error");
+    render();
   } finally {
     setBusy(false);
   }
@@ -1660,31 +1916,24 @@ function renderExport(analysis) {
         text: "Download PDF",
         onclick: () => {
           // A plain navigation: the server sets Content-Disposition, and the browser saves it.
-          location.href = `/api/analysis/${encodeURIComponent(analysis.id)}/export/pdf`;
+          location.href = `/api/analyses/${encodeURIComponent(analysis.id)}/export/pdf`;
         },
       }),
     ),
   ];
 }
 
-function countOmittedClaims(report) {
-  const claims = [
-    ...report.components,
-    ...report.flows,
-    ...report.dependencies,
-    ...report.risks,
-    report.testing,
-  ];
-  return claims.filter((claim) => (claim.evidenceIds ?? []).length === 0).length;
-}
-
 // -------------------------------------------------------------------- drawer
 
 async function openEvidence(evidenceId) {
   const drawer = $("drawer");
+  // Remember where focus came from before taking it, so Escape can hand it back. A
+  // keyboard user who opens a citation from a graph node has to land back on that node.
+  state.drawerReturn = document.activeElement;
   drawer.hidden = false;
   $("drawer-eyebrow").textContent = "Evidence";
   $("drawer-title").textContent = evidenceId;
+  $("drawer-close").focus();
   const body = $("drawer-body");
   clear(body);
   body.append(el("p", { class: "hint", text: "Loading the artefact…" }));
@@ -1692,10 +1941,13 @@ async function openEvidence(evidenceId) {
   try {
     let payload = state.evidence.get(evidenceId);
     if (!payload) {
-      payload = await api(`/api/analysis/${encodeURIComponent(state.analysis.id)}/evidence/${encodeURIComponent(evidenceId)}`);
+      payload = await api(
+        `/api/analyses/${encodeURIComponent(state.analysis.id)}/evidence/${encodeURIComponent(evidenceId)}`,
+      );
       state.evidence.set(evidenceId, payload);
     }
     clear(body);
+    $("drawer-eyebrow").textContent = evidenceLocationLabel(payload);
     body.append(...evidenceDetail(payload));
   } catch (error) {
     clear(body);
@@ -1704,7 +1956,14 @@ async function openEvidence(evidenceId) {
 }
 
 function closeDrawer() {
-  $("drawer").hidden = true;
+  const drawer = $("drawer");
+  if (drawer.hidden) return;
+  drawer.hidden = true;
+  // Focus inside a hidden element is focus nowhere: without this, Escape leaves the
+  // keyboard at the top of the document and the user has to tab back to where they were.
+  const returnTo = state.drawerReturn;
+  state.drawerReturn = null;
+  if (returnTo && typeof returnTo.focus === "function" && returnTo.isConnected) returnTo.focus();
 }
 
 function evidenceDetail(payload) {
@@ -1727,6 +1986,20 @@ function evidenceDetail(payload) {
       el("dd", { text: evidence.type }),
       el("dt", { text: "Reported location" }),
       el("dd", { text: source?.reportedLocation ?? evidence.location ?? "—" }),
+      // The model's claim is directly above; this is what the viewer could actually
+      // verify. Keeping them adjacent and separately labelled is the whole point: one is
+      // a claim about the repository, the other is a measurement of it.
+      el("dt", { text: "Verified lines" }),
+      el("dd", { text: evidenceLineRange(payload) ?? "not located" }),
+      el("dt", { text: "Strength" }),
+      el(
+        "dd",
+        {},
+        el("span", {
+          class: `pill pill-${evidenceStrength(payload).tone}`,
+          text: evidenceStrength(payload).label,
+        }),
+      ),
       el("dt", { text: "Supports" }),
       el("dd", { text: evidence.supports ?? "—" }),
       evidence.claimIds?.length ? el("dt", { text: "Cited by claims" }) : null,
