@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { RequestError, type AnalysisConfig, type CollectOptions, type ExplorationBudget, type LlmClient, type PrecisionPolicy } from "@repo-arch/shared";
 import { buildArchitectureGraph } from "./architecture";
 import { AnalysisEventBus, PHASE_MESSAGES, logFailureMessage, safeFailureMessage } from "./lifecycle";
@@ -84,6 +85,17 @@ export class AnalysisRunner {
   private readonly now: () => Date;
   private readonly logError: (message: string) => void;
   private nextId = 1;
+  /**
+   * Identifies this runner, so the counter beside it only has to be unique within
+   * one. A timestamp alone was not enough: two runners constructed in the same
+   * millisecond — two workers starting together, two harnesses in one test — got
+   * the same prefix and then the same ids, which a durable store cannot tolerate.
+   * Four random characters close that without lengthening the id much, and without
+   * a dependency. They join the timestamp inside one opaque segment rather than
+   * adding a third, because the id's shape — one slug then a counter — is what
+   * callers and the API surface already treat as the contract.
+   */
+  private readonly idPrefix: string;
   /** Analyses this runner is executing right now. */
   private readonly live = new Set<string>();
   /** Of those, the ones whose record has stopped existing under them. */
@@ -92,6 +104,7 @@ export class AnalysisRunner {
   constructor(private readonly dependencies: AnalysisRunnerDependencies) {
     this.now = dependencies.now ?? ((): Date => new Date());
     this.logError = dependencies.logError ?? ((message: string): void => console.error(message));
+    this.idPrefix = `${this.now().getTime().toString(36)}${randomUUID().slice(0, 4)}`;
   }
 
   /** True while this runner is executing the analysis. */
@@ -344,15 +357,15 @@ export class AnalysisRunner {
   }
 
   /**
-   * `an-1`, `an-2`, …, with the process start time as a prefix.
+   * `an-1`, `an-2`, …, prefixed by an identifier for this runner.
    *
    * Ids have to be unique across restarts now that the store is durable, and they
-   * have to stay short enough to appear in a URL a person reads. A timestamp plus
-   * a counter gives both without a dependency: unique unless two processes start
-   * in the same millisecond, and sortable by accident rather than by promise.
+   * have to stay short enough to appear in a URL a person reads. The prefix is
+   * where uniqueness comes from and the counter only orders within one runner, so
+   * two runners started in the same millisecond mint different ids.
    */
   private mintId(): string {
-    return `an-${this.now().getTime().toString(36)}-${this.nextId++}`;
+    return `an-${this.idPrefix}-${this.nextId++}`;
   }
 }
 
