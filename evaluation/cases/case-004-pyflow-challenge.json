@@ -1,0 +1,215 @@
+{
+  "id": "case-004-pyflow-challenge",
+  "title": "pyflow — challenge set: reading a Python CLI without its readme",
+  "repository": "fixtures/pyflow",
+  "set": "challenge-v2",
+  "notes": "Challenge Set v2 for the same repository as case-002. Half of these questions are about Python-specific surfaces a JavaScript-shaped reader tends to miss — a console_scripts entry point declared in pyproject.toml rather than a bin field (q02), a strict-mypy posture visible only in tool configuration (q03), packaging metadata as the source of truth for dependencies (q12). The other half are about the two things this codebase does implicitly: it threads step output through one local variable (q05) and it validates step types lazily, which is why q08 is the hardest question in the set.",
+  "questions": [
+    {
+      "id": "challenge-v2-pyflow-q01",
+      "question": "If a user runs pyflow without passing --state-url, where does run state get written?",
+      "field": "any",
+      "expectedAnswer": "To sqlite:///.pyflow/state.db — a SQLite file under .pyflow/ in the working directory. That default is the Click option's default value in pyflow/cli.py.",
+      "expectedKeywords": [],
+      "anyOfKeywords": [["sqlite:///.pyflow/state.db"], ["state.db"], [".pyflow"]],
+      "mustNotContain": ["state is kept in postgres", "the default state url points at postgres"],
+      "expectedEvidence": ["pyflow/cli.py", "README.md"],
+      "evidenceRationale": "The default is an argument to click.option in pyflow/cli.py, and README.md restates it in prose. Either citation shows the value rather than assuming the conventional one, which matters here because the same literal also appears as an unrelated default in pyflow/steps/load.py — see q09.",
+      "category": "direct-fact",
+      "tags": ["cli", "configuration", "defaults"],
+      "difficulty": "easy"
+    },
+    {
+      "id": "challenge-v2-pyflow-q02",
+      "question": "How does the `pyflow` command become available on a user's PATH after installation?",
+      "field": "any",
+      "expectedAnswer": "Through a console script declared in packaging metadata: [project.scripts] in pyproject.toml maps pyflow to pyflow.cli:main, so pip generates the wrapper at install time.",
+      "expectedKeywords": [],
+      "anyOfKeywords": [
+        ["project.scripts"],
+        ["pyflow.cli:main"],
+        ["console script"],
+        ["entry point", "pyproject"]
+      ],
+      "mustNotContain": ["console_scripts in setup.cfg", "shell alias", "symlink into"],
+      "expectedEvidence": ["pyproject.toml"],
+      "evidenceRationale": "pyproject.toml is the only file that declares the entry point; there is no setup.py, no setup.cfg and no Makefile in this repository. The mechanism is the Python analogue of a package.json bin field, and the question measures whether a system knows where to look for it in a language whose conventions differ from the one the tool is written in.",
+      "category": "multi-language",
+      "tags": ["python", "packaging", "entry-point"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "challenge-v2-pyflow-q03",
+      "question": "What is this project's stance on static typing, and how is it enforced?",
+      "field": "any",
+      "expectedAnswer": "Strict. [tool.mypy] strict = true in pyproject.toml, mypy is a declared dev dependency, and every module opens with from __future__ import annotations so annotations are evaluated lazily. Signatures are fully annotated, including PEP 604 unions like `str | None`.",
+      "expectedKeywords": ["mypy"],
+      "anyOfKeywords": [["strict"], ["annotation"], ["type hint"], ["typed"]],
+      "mustNotContain": ["the code carries no type annotations", "mypy is not configured"],
+      "expectedEvidence": ["pyproject.toml", "pyflow/store.py"],
+      "evidenceRationale": "The enforcement lives in tool configuration, not in code: pyproject.toml carries both the dev dependency and the strict flag. pyflow/store.py is the shortest module that demonstrates the convention being followed. Neither the readme nor any docstring mentions typing, so this is only answerable by reading configuration a JavaScript-shaped reader has no equivalent for.",
+      "category": "multi-language",
+      "tags": ["python", "typing", "tooling"],
+      "difficulty": "hard"
+    },
+    {
+      "id": "challenge-v2-pyflow-q04",
+      "question": "When the same pipeline is run twice, does the state store overwrite the earlier run's records or accumulate them?",
+      "field": "any",
+      "expectedAnswer": "It accumulates. record_step only ever issues an INSERT into step_runs, whose id is an INTEGER PRIMARY KEY AUTOINCREMENT with no unique constraint on pipeline or step, so each run appends a fresh row and the table is an append-only history.",
+      "expectedKeywords": ["insert"],
+      "anyOfKeywords": [["append"], ["history"], ["every run"], ["new row"], ["accumulat"]],
+      "mustNotContain": ["updates the existing row", "overwrites the previous run"],
+      "expectedEvidence": ["pyflow/store.py"],
+      "evidenceRationale": "The words this question is asked in — accumulate, overwrite, upsert, append-only — appear nowhere in the repository. The answer has to be inferred from what pyflow/store.py does not contain: no UPDATE, no ON CONFLICT, no unique index. A keyword search for the question's vocabulary returns nothing, and the absence of a contradicting statement is not the same as evidence.",
+      "category": "keyword-mismatch",
+      "tags": ["persistence", "vocabulary-gap", "sqlite"],
+      "difficulty": "hard"
+    },
+    {
+      "id": "challenge-v2-pyflow-q05",
+      "question": "How does data get from one step to the next, and why does the extract step not receive its predecessor's output?",
+      "field": "any",
+      "expectedAnswer": "Through a single local variable in the run command: `rows` is reassigned by each handler and passed to the next one, so the whole pipeline's data stays in memory in one process. extract is called as handler(step.options) with no rows argument, because it is a source — it reads from a file rather than from an upstream step — and the dispatch line special-cases it on step.type.",
+      "expectedKeywords": [],
+      "anyOfKeywords": [
+        ["rows", "extract"],
+        ["in memory", "step"],
+        ["previous step", "rows"],
+        ["variable", "handler"]
+      ],
+      "mustNotContain": ["each step reads from the database", "steps share state through the store"],
+      "expectedEvidence": ["pyflow/cli.py"],
+      "evidenceRationale": "Both halves of the answer are one conditional expression in the run loop in pyflow/cli.py. Nothing in pyflow/steps/ reveals the contract — the handlers have different arities and no shared base class or protocol to read it off — so a system that reads the step modules and not the caller cannot answer this.",
+      "category": "cross-file-reasoning",
+      "tags": ["data-flow", "dispatch", "in-process"],
+      "difficulty": "hard"
+    },
+    {
+      "id": "challenge-v2-pyflow-q06",
+      "question": "If a step raises, is there any durable record of the failure afterwards?",
+      "field": "any",
+      "expectedAnswer": "Yes. The run loop catches the exception, calls record_step with status \"failed\" and str(exc) before re-raising, and step_runs has a nullable error column to hold the message. So the failure survives the process exit even though the command still fails.",
+      "expectedKeywords": ["failed"],
+      "anyOfKeywords": [["step_runs"], ["error"], ["record_step"], ["persist"]],
+      "mustNotContain": ["failures are not persisted", "a failed step leaves no row"],
+      "expectedEvidence": ["pyflow/cli.py", "pyflow/store.py"],
+      "evidenceRationale": "No documentation says failures are recorded. The evidence is an except branch in pyflow/cli.py that calls record_step before re-raising, plus the error column in the step_runs DDL in pyflow/store.py — a schema detail that only makes sense once the except branch is read. Either file alone leaves the claim half-supported.",
+      "category": "indirect-evidence",
+      "tags": ["failure-mode", "persistence", "undocumented"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "challenge-v2-pyflow-q07",
+      "question": "Which module owns the step_runs table definition?",
+      "field": "any",
+      "expectedAnswer": "pyflow/store.py. It holds the _SCHEMA DDL and creates the table in engine_for. pyflow/cli.py calls into it, pyflow/steps/load.py writes to a different table entirely, and there is no migrations directory.",
+      "expectedKeywords": ["store.py"],
+      "anyOfKeywords": [["step_runs"], ["schema"], ["ddl"]],
+      "mustNotContain": ["the schema is defined in cli.py", "the schema is defined in pipeline.py"],
+      "expectedEvidence": ["pyflow/store.py"],
+      "evidenceRationale": "Three files in this repository execute SQL and two of them create tables, so a briefing can cite something SQL-shaped and still be wrong. Only pyflow/store.py contains the step_runs DDL; a citation to pyflow/cli.py, which is where the table is used most visibly, does not support the claim.",
+      "category": "evidence-precision",
+      "tags": ["sql", "citation-precision", "ownership"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "challenge-v2-pyflow-q08",
+      "question": "Is a pipeline validated for unknown step types before any step runs?",
+      "field": "any",
+      "expectedAnswer": "No. Only the graph is validated up front — load_pipeline and topological_order reject unknown dependencies and cycles before execution. The step type is resolved by REGISTRY.get inside the run loop, when that step's turn arrives, so a typo in the last step's type is not discovered until every step before it has already executed and committed its work.",
+      "expectedKeywords": [],
+      "anyOfKeywords": [
+        ["already"],
+        ["earlier steps"],
+        ["mid-run"],
+        ["partially"],
+        ["at that point"],
+        ["not validated", "up front"],
+        ["when", "reached"]
+      ],
+      "mustNotContain": [
+        "validates every step type up front",
+        "unknown step types are rejected before execution"
+      ],
+      "expectedEvidence": ["pyflow/cli.py", "pyflow/pipeline.py"],
+      "evidenceRationale": "This is an absence claim that must not be answered by failing to find a validator. It is established positively, by two present facts in two files: pyflow/pipeline.py shows exactly which validations happen before execution, and pyflow/cli.py shows the registry lookup sitting inside the loop. The contrast between the two is the answer, and a system that finds one validation pass and stops will get this backwards.",
+      "category": "negative-absence",
+      "tags": ["validation", "absence", "partial-failure"],
+      "difficulty": "hard"
+    },
+    {
+      "id": "challenge-v2-pyflow-q09",
+      "question": "A load step is configured with no url option. Which database does it write to, relative to the run-state database?",
+      "field": "any",
+      "expectedAnswer": "The same one. load falls back to options.get(\"url\", \"sqlite:///.pyflow/state.db\"), which is the same literal the CLI uses for --state-url, so loaded rows and the step_runs bookkeeping end up in one SQLite file. The two defaults are independent constants that happen to coincide — nothing shares them.",
+      "expectedKeywords": [],
+      "anyOfKeywords": [
+        ["same file"],
+        ["same database"],
+        ["same sqlite"],
+        ["state.db", "load"]
+      ],
+      "mustNotContain": ["a separate database for loaded data", "load writes to postgres"],
+      "expectedEvidence": ["pyflow/steps/load.py", "pyflow/cli.py"],
+      "evidenceRationale": "Two files independently define the same default and neither references the other, so each one on its own supports a reasonable but different reading: pyflow/cli.py alone suggests the path is the state store, pyflow/steps/load.py alone suggests it is a data sink. The claim requires both, and the interesting part of the answer is that the coupling is a coincidence rather than a design.",
+      "category": "competing-evidence",
+      "tags": ["defaults", "coincidence", "sqlite"],
+      "difficulty": "hard"
+    },
+    {
+      "id": "challenge-v2-pyflow-q10",
+      "question": "What are the structural parts of this package, and where does step execution actually live?",
+      "field": "architecture",
+      "expectedAnswer": "Four parts: cli.py (Click entry point and the run loop), pipeline.py (YAML loading and topological ordering), store.py (SQLAlchemy state persistence), and steps/ (the handler implementations plus the REGISTRY that names them). Execution is not a component — it is the for-loop in the CLI command, so the entry point doubles as the orchestrator.",
+      "expectedKeywords": [],
+      "anyOfKeywords": [
+        ["cli", "steps"],
+        ["pipeline", "store"],
+        ["registry", "cli"]
+      ],
+      "mustNotContain": ["steps are executed by pyflow/executor.py", "celery"],
+      "expectedEvidence": ["pyflow/cli.py", "README.md"],
+      "evidenceRationale": "The module list is recoverable from the tree, but the second half is not: there is no executor, scheduler or engine module, and the orchestration is a loop inside a Click command in pyflow/cli.py. A system that reports architecture from directory names alone will describe a component that does not exist or miss where the work happens.",
+      "category": "architecture-inference",
+      "tags": ["structure", "orchestration"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "challenge-v2-pyflow-q11",
+      "question": "What happens to the remaining steps when one step fails partway through a run?",
+      "field": "any",
+      "expectedAnswer": "They do not run. The exception is recorded and re-raised, which unwinds out of the for-loop and out of the Click command, so the process exits non-zero. There is no retry and no cleanup: the rows earlier steps wrote are still there, and their step_runs entries still say succeeded.",
+      "expectedKeywords": [],
+      "anyOfKeywords": [
+        ["re-raise"],
+        ["reraise"],
+        ["abort"],
+        ["stops"],
+        ["no retry"],
+        ["not retried"],
+        ["exits"]
+      ],
+      "mustNotContain": ["continues with the remaining steps", "the failed step is retried"],
+      "expectedEvidence": ["pyflow/cli.py"],
+      "evidenceRationale": "The whole behaviour is the try/except around the handler call in pyflow/cli.py — record, then re-raise. The absence of a retry, of a rollback and of any compensating action is visible in the same handful of lines, which is why one citation is enough here and two were needed for q06.",
+      "category": "behavioral-flow",
+      "tags": ["failure-mode", "no-retry"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "challenge-v2-pyflow-q12",
+      "question": "What are the runtime dependencies, and what is each one for?",
+      "field": "dependencies",
+      "expectedAnswer": "Four: click for the command-line interface, pyyaml for parsing pipeline definitions, sqlalchemy for the state store engine, and rich for console output. pytest, mypy and ruff are development-only, and requires-python is >=3.11.",
+      "expectedKeywords": ["click"],
+      "anyOfKeywords": [["rich"], ["sqlalchemy"], ["pyyaml"], ["yaml"]],
+      "mustNotContain": ["pandas", "numpy", "the requests library"],
+      "expectedEvidence": ["pyproject.toml"],
+      "evidenceRationale": "pyproject.toml is the manifest, and the [project] dependencies list is the only place the runtime set is separated from the dev set. rich is the one that has to be looked up rather than guessed — it is imported in exactly one line of pyflow/cli.py and mentioned in no documentation, so a briefing that describes it by name has read something.",
+      "category": "configuration-dependency",
+      "tags": ["dependencies", "python", "manifest"],
+      "difficulty": "easy"
+    }
+  ]
+}

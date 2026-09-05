@@ -1,0 +1,140 @@
+{
+  "$comment": "The benchmark manifest. This file is the single authored declaration of what the benchmark contains; every count here is re-derived from the loaded case files by loadBenchmark() and cross-checked, so a case added without updating the manifest fails a test rather than silently changing a denominator.",
+
+  "benchmarkName": "repo-archaeologist",
+  "benchmarkVersion": "v2",
+
+  "regressionCount": 14,
+  "challengeCount": 24,
+  "totalCount": 38,
+
+  "sets": [
+    {
+      "id": "regression-v1",
+      "title": "Regression Set v1",
+      "frozen": true,
+      "cases": ["case-001-orders-api", "case-002-pyflow"],
+      "description": "The original fourteen questions, first measured in Iteration 3. Frozen: their text, expected answers, keyword requirements and expected evidence must stay byte-identical, because they are the control that makes Iteration 3's numbers comparable to today's. Twelve of the fourteen are answerable from a README or a manifest; only orders q5-oversell-guard and pyflow q6-step-dispatch require reading source. That was a deliberate headroom design, and it is also why the set alone can no longer discriminate between systems — see Challenge Set v2."
+    },
+    {
+      "id": "challenge-v2",
+      "title": "Challenge Set v2",
+      "frozen": false,
+      "cases": ["case-003-orders-api-challenge", "case-004-pyflow-challenge"],
+      "description": "Twenty-four questions added in Iteration 6 against the same two fixtures, weighted deliberately away from documentation. Twenty of the twenty-four have expected evidence that is a source file rather than a README or manifest, and five categories absent from the regression set are covered here for the first time: architecture-inference, behavioral-flow, evidence-precision, competing-evidence and multi-language."
+    }
+  ],
+
+  "categories": [
+    { "id": "direct-fact", "description": "Explicitly stated in one relevant source." },
+    { "id": "cross-file-reasoning", "description": "Requires joining evidence from more than one location." },
+    { "id": "indirect-evidence", "description": "Answerable, but not in the wording the question uses." },
+    { "id": "keyword-mismatch", "description": "The question's vocabulary does not occur in the repository at all." },
+    { "id": "architecture-inference", "description": "A supported structural conclusion drawn from several files." },
+    { "id": "behavioral-flow", "description": "Runtime behaviour across a sequence of steps." },
+    { "id": "configuration-dependency", "description": "Dependencies, configuration, environment, scripts, packaging." },
+    { "id": "negative-absence", "description": "An absence claim, which must be established positively rather than by a failed search." },
+    { "id": "competing-evidence", "description": "Several files look relevant; only some actually support the claim." },
+    { "id": "evidence-precision", "description": "A broad, plausible citation is easy; a precise one exists and is required." },
+    { "id": "multi-language", "description": "Requires a convention from a language or ecosystem other than the tool's own." }
+  ],
+
+  "difficulties": ["easy", "medium", "hard"],
+
+  "fixtureRepositories": ["fixtures/orders-api", "fixtures/pyflow"],
+
+  "difficultyDistribution": {
+    "regression-v1": { "easy": 8, "medium": 4, "hard": 2 },
+    "challenge-v2": { "easy": 3, "medium": 11, "hard": 10 }
+  },
+
+  "$annotations": "Classification for the frozen set only. Challenge questions carry their own metadata inline in their case files; the regression questions cannot, because those two files must stay byte-identical, so their classification lives out here as a sidecar. Keys are caseId/questionId: the regression ids predate the global-uniqueness convention and 'q1-purpose' occurs in both frozen files, so a bare question id is not a key. The classifications are descriptive — they record what each frozen question already tests and are never read by the scorer.",
+
+  "annotations": {
+    "case-001-orders-api/q1-purpose": {
+      "category": "direct-fact",
+      "difficulty": "easy",
+      "tags": ["purpose", "readme"],
+      "evidenceRationale": "README.md opens by stating that this is the write side of the ordering system."
+    },
+    "case-001-orders-api/q2-http-framework": {
+      "category": "configuration-dependency",
+      "difficulty": "easy",
+      "tags": ["dependencies", "framework"],
+      "evidenceRationale": "express appears in package.json dependencies; a manifest read answers it outright."
+    },
+    "case-001-orders-api/q3-event-publication": {
+      "category": "direct-fact",
+      "difficulty": "easy",
+      "tags": ["events", "kafka"],
+      "evidenceRationale": "README.md names the order.created topic and package.json carries kafkajs, so both halves are documented."
+    },
+    "case-001-orders-api/q4-auth-boundary": {
+      "category": "direct-fact",
+      "difficulty": "easy",
+      "tags": ["auth", "api-surface"],
+      "evidenceRationale": "README.md states that every route needs a bearer token except /health. Challenge q03 asks the same question of the code, where the answer is a middleware ordering fact instead."
+    },
+    "case-001-orders-api/q5-oversell-guard": {
+      "category": "cross-file-reasoning",
+      "difficulty": "hard",
+      "tags": ["concurrency", "sql", "headroom"],
+      "evidenceRationale": "The FOR UPDATE row lock is in src/services/inventory.js and the incident report explains why it is there. One of the two regression questions that cannot be answered from documentation."
+    },
+    "case-001-orders-api/q6-testing-gap": {
+      "category": "negative-absence",
+      "difficulty": "medium",
+      "tags": ["testing", "absence"],
+      "evidenceRationale": "README.md says outright that there are unit tests only and no integration tests; the difficulty is in judging which gap is largest."
+    },
+    "case-001-orders-api/q7-api-surface": {
+      "category": "direct-fact",
+      "difficulty": "easy",
+      "tags": ["api-surface", "http"],
+      "evidenceRationale": "README.md and package.json between them establish an HTTP/Express surface."
+    },
+
+    "case-002-pyflow/q1-purpose": {
+      "category": "direct-fact",
+      "difficulty": "easy",
+      "tags": ["purpose", "cli"],
+      "evidenceRationale": "README.md describes pyflow as a command-line ETL pipeline runner."
+    },
+    "case-002-pyflow/q2-cli-library": {
+      "category": "configuration-dependency",
+      "difficulty": "easy",
+      "tags": ["dependencies", "python"],
+      "evidenceRationale": "click is the first entry in the pyproject.toml dependency list."
+    },
+    "case-002-pyflow/q3-execution-order": {
+      "category": "direct-fact",
+      "difficulty": "easy",
+      "tags": ["ordering", "graph"],
+      "evidenceRationale": "README.md states both the topological ordering and the cycle rejection."
+    },
+    "case-002-pyflow/q4-state-store": {
+      "category": "indirect-evidence",
+      "difficulty": "medium",
+      "tags": ["persistence", "sqlite"],
+      "evidenceRationale": "Neither README.md nor pyproject.toml says 'this is where run state is recorded' in those words; the answer comes from SQLAlchemy in the manifest plus the state database the readme mentions in passing."
+    },
+    "case-002-pyflow/q5-untested-steps": {
+      "category": "negative-absence",
+      "difficulty": "medium",
+      "tags": ["testing", "absence"],
+      "evidenceRationale": "README.md names transform as the tested step, which is what makes extract and load the untested ones."
+    },
+    "case-002-pyflow/q6-step-dispatch": {
+      "category": "keyword-mismatch",
+      "difficulty": "hard",
+      "tags": ["dispatch", "registry", "headroom"],
+      "evidenceRationale": "The question says 'mapped to the function that runs it'; the repository says REGISTRY. The other regression question that requires source, and the one that motivated the keyword-mismatch category."
+    },
+    "case-002-pyflow/q7-no-external-scheduler": {
+      "category": "negative-absence",
+      "difficulty": "medium",
+      "tags": ["absence", "execution-model"],
+      "evidenceRationale": "README.md states the single-process, sequential execution model, which is positive evidence for the absence of a scheduler rather than a failed search for one."
+    }
+  }
+}

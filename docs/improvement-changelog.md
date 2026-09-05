@@ -1277,3 +1277,178 @@ $0.00 — no paid model call. Roughly 130 lines of source across six files, 470 
 two new files, and one root patch version. The investigation cost more than the fix, which is the
 usual ratio when the log is pointing at the wrong file: five of the seven lines named the store, and
 none of them named the route that was actually responsible.
+
+---
+
+## Iteration 6 — Benchmark Expansion, Run Provenance and Executable Smoke Gates
+
+### Hypothesis
+
+There was none to test, and that is the point of the entry.
+
+Iteration 3 took the advanced system to **100.0 % (14/14)** on the benchmark and it has stayed
+there. A benchmark a system scores full marks on has stopped being a measuring instrument: it can
+report "no regression" and nothing else. Every hypothesis after that point would have been argued
+from intuition, because the instrument had no room left to disagree.
+
+So this iteration built a harder instrument first and measured *before* touching the analysis
+algorithm, on the rule stated in the task: **measure first, hypothesise second, change one thing
+third, measure again.** The measurement below is the whole deliverable. The hypothesis it produced
+is recorded for the iteration that acts on it.
+
+### The change
+
+No analysis code was touched. `pnpm verify:measured --ref HEAD` reports `OK`, and
+`ADVANCED_VERSION` and `BASELINE_VERSION` are both unchanged at 0.1.0 — which is the precondition
+for the number below meaning what it says.
+
+**Regression Set v1 — frozen.** The original 14 questions are byte-identical to their committed
+blobs, verified by `git hash-object` rather than by inspection:
+
+```
+evaluation/cases/case-001-orders-api.json  worktree=0cfc5a78…  HEAD=0cfc5a78…
+evaluation/cases/case-002-pyflow.json      worktree=3d8de326…  HEAD=3d8de326…
+```
+
+Because they may not change, they carry no inline metadata; their category and difficulty
+classification lives in the manifest's `annotations` map, keyed `caseId/questionId`.
+
+**Challenge Set v2 — 24 new questions**, 12 per fixture repository, covering all eleven mandated
+categories at 3 easy / 11 medium / 10 hard. Challenge questions classify themselves inline, and
+`EvalCaseSchema` is a `z.object`, so it strips the keys it does not declare: `category`,
+`difficulty`, `tags` and `evidenceRationale` provably cannot reach the scorer. Metadata cannot
+influence a score because the scorer never receives it.
+
+**The manifest** (`evaluation/benchmark.json`) declares the counts once. `loadBenchmark()`
+re-derives all three from the loaded case files and fails the load on a mismatch, so a case added
+without updating the manifest is an error rather than a silently changed denominator.
+
+**Provenance** is a third identity, not a reinterpretation of an existing one. `systemVersion` is
+what code ran, `provenance` is where the run came from, `benchmark.version` is which dataset it was
+measured against, and none stands in for another. It is a real schema change — report
+`schemaVersion` 2, a migrated store — and `readReportIdentity()` returns `null` rather than a
+default for a v1 report, so a historical Iteration 3 run can never be relabelled as having been
+produced by this benchmark.
+
+### Measurement
+
+Real model, unchanged system, whole benchmark.
+
+| | |
+|---|---|
+| Run id | `eval-advanced-2026-09-05T01-35-25Z` |
+| Command | `pnpm evaluate:advanced -- --model gemini-3.5-flash-lite --provenance iteration-6-baseline --case-delay 5` |
+| Model | `gemini-3.5-flash-lite`, seed 7, thinking `low` |
+| Provenance | `iteration-6-baseline` |
+| Benchmark | `repo-archaeologist v2` — 38/38 questions scored |
+| Fabrications / dropped citations / unsupported briefing claims | 0 / 0 / 0 |
+| Tokens | 113 590 in / 12 800 out |
+| Cost | $0.066076 |
+
+**Reported per set, because a combined average is the one number that can hide a regression.**
+
+| | Regression Set v1 (frozen) | Challenge Set v2 | Combined |
+|---|---|---|---|
+| **Evidence-backed task accuracy** | **100.0 % (14/14)** | **29.2 % (7/24)** | **55.3 % (21/38)** |
+| Answer accuracy | 100.0 % (14/14) | 41.7 % (10/24) | 63.2 % (24/38) |
+| Unsupported answers | 0 | 3 | 3 |
+| Mean evidence relevance | 0.4105 | — | 0.4007 |
+
+**No regression.** The Regression Set v1 subset reproduces Iteration 3's measurement exactly —
+`eval-advanced-2026-08-31T06-18-59Z` scored 100.0 % / 100.0 % with mean evidence relevance
+**0.4105**, and the frozen subset of this run scores 100.0 % / 100.0 % with mean evidence relevance
+**0.4105**. Same model, same seed, same cases, same numbers to four decimal places.
+
+The combined 55.3 % is reported and is the least informative figure here: it is an artefact of
+mixing a saturated set with a discriminating one, and it would move if the ratio of the two sets
+changed without any system changing at all.
+
+### Failure analysis
+
+17 failures: **14 wrong-answer, 3 uncited, 0 fabrications.**
+
+Grouped four ways, the signal is not where the task's worked example suggested it might be.
+
+| By evidence kind | n | Answer accuracy | Evidence-backed |
+|---|---|---|---|
+| documentation | 15 | 93.3 % | 80.0 % |
+| mixed | 8 | 62.5 % | 62.5 % |
+| **source** | **15** | **33.3 %** | **26.7 %** |
+
+| By difficulty | n | Answer accuracy | | By repository | n | Answer accuracy |
+|---|---|---|---|---|---|---|
+| easy | 11 | 81.8 % | | orders-api | 19 | 73.7 % |
+| medium | 15 | 66.7 % | | pyflow | 19 | 52.6 % |
+| hard | 12 | 41.7 % | | | | |
+
+Difficulty and repository are real but weaker gradients, and both partly restate the first table:
+the hard questions and the pyflow questions are disproportionately the source-backed ones.
+Category is the *least* useful grouping — the weakest categories (multi-language 0/2,
+indirect-evidence 1/3, behavioral-flow 1/3) are simply the categories whose evidence lives in
+source files.
+
+**The decisive check.** The obvious reading of "source-backed questions fail" is a retrieval
+weakness, and it is wrong. Two seeded diagnostic runs recorded which files actually entered the
+model's context. Cross-referencing every failure against them:
+
+```
+evidence WAS in context, answer still missing: 16/17
+evidence never retrieved:                       1/17
+```
+
+For `fixtures/orders-api` the system read **every** source file, none truncated,
+`budgetExhausted: false` — including `src/config.js`, which contains the literal `4000` that
+question q01 asks for and that the briefing does not contain. That question is classified `easy`
+and `direct-fact`, and the same run scored 14/14 on the frozen set.
+
+What the briefing says about that file is *"listens on the configured port"*. What it says about
+the connection pool omits `max: 10`. The missing tokens across the whole failure set are almost
+entirely concrete literals that were sitting in context: `4000`, `database_url`, `kafka_brokers`,
+`mypy`, `insert`, `failed`.
+
+### Hypothesis for the next iteration
+
+**Observation.** The frozen set scores 100 % and the challenge set 29.2 %, and the gap tracks
+evidence kind — 93.3 % on documentation-backed questions against 33.3 % on source-backed ones.
+
+**Failure pattern.** In 16 of 17 failures the expected evidence was already in the model's context,
+un-truncated, and the fact still never reached the briefing. Zero fabrications and zero dropped
+citations: the system is not inventing and not mis-citing.
+
+**Hypothesis.** Synthesis compresses source it has read into role-level descriptions and discards
+the concrete values. Accuracy on source-backed questions is limited by claim *granularity*, not by
+retrieval coverage or by grounding.
+
+**Mechanism.** A component claim is one sentence about what a module does. A literal like `max: 10`
+has no place in that sentence, so it is dropped even though the line is in context and citable. The
+scorer additionally credits evidence only when a *single* claim answers the question, which is why
+three questions were answered correctly across separate claims and scored as uncited.
+
+**Expected metric movement.** Preserving concrete values in claims should move source-backed answer
+accuracy (33.3 %, 15 questions) and leave documentation-backed accuracy (93.3 %) flat.
+
+**Risk.** A claim stuffed with literals is a worse briefing for a human reader; more specific
+excerpts could lower mean evidence relevance; and inviting specificity is exactly how fabrications
+start. Fabrications are currently 0, which is the thing most worth not losing.
+
+### Decision
+
+**Kept — measurement only.** No analysis change was made, for a stated reason rather than for lack
+of a candidate.
+
+The evidence points at one lever: the synthesis prompt. The standing constraint carried forward
+from Iteration 5 — *do not change baseline or advanced prompts to improve an iteration* — forbids
+pulling it here. Every other single-variable change the task permits (scout, ranking, tools,
+grounding) targets retrieval, and the measurement above shows retrieval is not the bottleneck in 16
+of 17 failures. Making one of those changes would have been precisely the intuitively-appealing,
+unmeasured change the task rules out.
+
+A measurement-only iteration is a valid result, and inventing an algorithmic change to make this
+entry look more substantial would have made it less true.
+
+### Cost of the result
+
+$0.066076 for the benchmark run, plus $0.033038 for the two diagnostic runs that established the
+16/17 split — $0.099114 in total. The mock validation pass that preceded them cost nothing and is
+not a quality measurement of anything; it exists to prove the pipeline scores 38 questions end to
+end before any paid call is made.

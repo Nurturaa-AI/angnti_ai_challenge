@@ -7,6 +7,128 @@ All notable changes to Repo Archaeologist. Format loosely follows
 
 Nothing yet. See [`## Next`](#next) for what the following iteration has to address.
 
+## [0.7.0] — 2026-09-05
+
+**The benchmark had stopped being able to disagree.**
+
+Since Iteration 3 the advanced system has scored 14/14. A dataset you score full marks on cannot
+report anything except *not worse*: every subsequent decision would have been argued from
+intuition, and every subsequent number would have been 100 % or a tie. Iteration 6 fixed the
+instrument rather than the system, measured the unchanged system against it, and then — on the
+evidence — declined to change the analysis.
+
+### Added — Challenge Set v2, beside a frozen Regression Set v1
+
+- **24 new questions**, 12 per fixture repository, spanning eleven categories at 3 easy / 11 medium
+  / 10 hard. The dataset is now 38 questions in two sets.
+- **The original 14 are frozen and byte-identical**, verified by `git hash-object` rather than by
+  intention. They are Regression Set v1, and they are what makes Iteration 3's number still
+  comparable.
+- **14 of the 24 expect *source* evidence**, against 2 of 14 on the frozen set. This is the
+  long-standing [limitation 7](docs/evaluation.md#limitations) addressed from the other end:
+  rather than widening the frozen lists after seeing which files the system chose — fitting the
+  ruler to the result — the new questions name implementation files from the start, written before
+  any system ran against them.
+- **`evaluation/benchmark.json`** declares the benchmark's identity, sets and counts.
+  `loadBenchmark()` re-derives every count from the case files and fails the load on a mismatch, so
+  a case added without updating the manifest is a test failure rather than a silently changed
+  denominator.
+- **Metadata provably cannot reach the scorer.** Challenge questions carry `category`,
+  `difficulty`, `tags` and `evidenceRationale` inline; `EvalCaseSchema` is a `z.object` and strips
+  what it does not declare, so the object the scorer receives never contains them. The frozen
+  questions cannot carry metadata at all without changing their bytes, so theirs lives in the
+  manifest's `annotations` map — an asymmetry that is ugly and load-bearing.
+- **`benchmark-report.ts`** splits a scored report by set, category, difficulty, repository and
+  evidence kind, each a complete partition. Per-set reporting is not a presentation choice: a
+  combined average is the one number that can hide a regression.
+
+### Added — run provenance, as a schema change
+
+- **Three identities, none substituting for another.** `systemVersion` is which code ran,
+  `provenance` is where the run came from, `benchmark.version` is which dataset it was measured
+  against. This closes item 3 of the previous `## Next`, which had been deferred twice — and it
+  closes it the way that item eventually specified, with a new field rather than a version bump
+  that would have asserted a behaviour change that did not happen.
+- **`--provenance` on both entry points and the web server**, defaulting to
+  `REPO_ARCHAEOLOGIST_PROVENANCE` then `unlabelled`, validated against
+  `/^[a-z0-9][a-z0-9._/-]{0,63}$/` *before* anything binds a port or opens a database. A shell
+  expansion that produced `$(whoami) run` fails as a sentence rather than landing in a stored row
+  and an HTTP body.
+- **A real migration.** Report `schemaVersion` 1 → 2; store `SCHEMA_VERSION` 1 → 2, adding
+  `system_version` and `provenance` as nullable columns. Existing databases upgrade on open, and a
+  version-1 row reads back as *unrecorded* rather than being backfilled with a plausible value — it
+  genuinely does not know where its run came from, and inventing an answer is what this whole
+  project is against.
+- **`readReportIdentity()` returns `null` for a v1 report.** Labelling a historical Iteration 3 run
+  as benchmark `v2` at read time would be fabricating a fact about history to fill a column.
+
+### Added — the entry points, actually executed
+
+`tsc --noEmit` and `node --check` both pass on an entry point that throws on line one. Three suites
+now close that gap, all offline, all with `GEMINI_API_KEY` blanked in the child:
+
+- **`apps/cli/test/cli-smoke.test.ts`** spawns the real binary — help, every parse refusal, the
+  evaluation-integrity refusal, and one full `--mock` analysis that is checked to have written the
+  files it printed.
+- **`apps/web/test/entry-smoke.test.ts`** spawns `main.ts` with real flags and answers over TCP:
+  `.env` load, config and budget resolution, database location, store construction, bind order,
+  the banner, and a full analysis whose stored row carries the provenance the process started with
+  and does not carry the workspace path.
+- **`apps/web/test/browser-smoke.test.ts`** executes the shipped `public/app.js` against a jsdom
+  document. This closes item 7 of the previous `## Next` — partially, and the limit is documented
+  rather than glossed: jsdom is **not a browser**, has no layout, paint or CSS cascade, and cannot
+  see a control rendered off-screen or hidden by a stylesheet.
+
+Both drift checks compare each entry point's `--help` against the flags its parser accepts, in both
+directions.
+
+### Changed — the measured-path guard moved in both directions
+
+Stated plainly because a guard that quietly loosens is worse than no guard. **Stronger:** the two
+frozen case files are now compared by *content* against the ref rather than watched for a diff
+entry, untracked files are covered (a new file under a guarded directory used to be invisible), and
+fixtures are checked through their tracked generator. **Weaker:** two named plumbing files under
+`evaluation/` are exempt, because a benchmark manifest cannot be threaded through the runner
+otherwise. The exemption is per-file, never per-directory, and each exempt file prints its own
+justification on every run.
+
+### Measured — and then nothing was changed
+
+`eval-advanced-2026-09-05T01-35-25Z`, `gemini-3.5-flash-lite`, seed 7, thinking low, provenance
+`iteration-6-baseline`, $0.066076. `pnpm verify:measured --ref HEAD` reports `OK`;
+`ADVANCED_VERSION` and `BASELINE_VERSION` are unchanged at 0.1.0.
+
+| | Regression Set v1 (frozen) | Challenge Set v2 |
+| --- | --- | --- |
+| **Evidence-backed task accuracy** | **100.0 % (14/14)** | **29.2 % (7/24)** |
+| Answer accuracy | 100.0 % (14/14) | 41.7 % (10/24) |
+| Fabrications / dropped citations | 0 / 0 | 0 / 0 |
+
+**Nothing regressed, exactly.** Iteration 3 scored 100.0 % / 100.0 % with mean evidence relevance
+0.4105; the frozen subset of this run scores 100.0 % / 100.0 % with mean evidence relevance 0.4105.
+
+**Where the failures are.** Accuracy tracks *where the evidence lives* — 93.3 % documentation-backed
+against 33.3 % source-backed — more strongly than it tracks difficulty or category. The obvious
+reading is a retrieval weakness and it is wrong: two diagnostic runs recorded which files reached
+the model, and **in 16 of 17 failures the expected evidence was already in context, un-truncated.**
+What is missing from the briefings is concrete literals the system was looking at — `4000`,
+`database_url`, `max: 10` — because a component claim is one sentence about what a module does, and
+a port number has no place in that sentence.
+
+**No analysis change was made, and that is the result rather than a shortfall.** The evidence names
+the synthesis prompt, which this iteration's constraints put out of scope; every other
+single-variable change available targets retrieval, which 16 of 17 failures show is not the
+bottleneck. The hypothesis is recorded in full in
+[`docs/improvement-changelog.md`](docs/improvement-changelog.md) for the iteration allowed to act
+on it.
+
+### Also
+
+- 644 → 776 tests. No existing test was modified to accommodate new behaviour.
+- `@types/jsdom` is deliberately **not** installed: `tsconfig.json` omits the DOM lib so server code
+  cannot reach for `document` by accident, and those types reintroduce DOM globals project-wide.
+  `apps/web/test/jsdom.d.ts` declares only what the one suite needs.
+
 ## [0.6.2] — 2026-09-02
 
 **A record was deleted out from under the run that owned it.**
@@ -1027,20 +1149,26 @@ nothing in this release claims the results are good.
 
 ## Next
 
-`0.6.1` added item 7 and closed the narrowest part of it. Iteration 5 closed item 5 and sharpened
-item 3. Items 1, 2 and 4 are carried forward unchanged in substance, because nothing in Iteration 5
-addressed them — it was a durability iteration, measured against the claim that it left the pipeline
-alone.
+Iteration 6 closed items 1 and 3 — the two that had been marked blocking — and closed the cheap
+half of item 7. It closed them without spending the headroom it created: the benchmark now
+discriminates, and the first change measured against it has deliberately not been made yet.
 
-1. **Grow the dataset. This is blocking, and has been for two iterations.**
-   `gemini-3.5-flash-lite` is at 14/14, so the primary metric has no headroom left on this dataset
-   and the next iteration cannot be measured on it at all — any change would score 100 % or worse,
-   and a tie tells you nothing. `gemini-3.5-flash` sits at 11/14 and is a harder test, but its three
-   remaining failures are all `citedEvidence = 0`, which is a synthesis problem rather than a
-   citation one. A third fixture in a language neither current one uses would also test whether the
-   scout's term extraction generalises past JavaScript and Python vocabulary. **Nothing else on this
-   list is worth doing first.** The default model is now `gemini-3.7-flash`, so the next measured run
-   needs an explicit `--model` on both systems to compare with anything recorded above.
+1. **Test the synthesis-granularity hypothesis. This is the one with evidence behind it.**
+   Source-backed questions score 33.3 % where documentation-backed ones score 93.3 %, and in **16
+   of 17 failures the expected evidence was already in the model's context, un-truncated** — so
+   this is not retrieval, not grounding, and not fabrication (there were none). The mechanism is
+   that a component claim is one sentence about a module's role, which has no room for the literal
+   the question asks for; a further three failures answered correctly *across separate claims*,
+   which the scorer does not credit. The full hypothesis, mechanism, expected metric movement and
+   risk are in [`docs/improvement-changelog.md`](docs/improvement-changelog.md).
+
+   Two things make this actionable in a way nothing on this list has been for three iterations.
+   The benchmark now has 24 questions of headroom, so a change can be *rejected* on the evidence
+   rather than tying at 100 %. And the change is one variable: it does not touch the scout, the
+   ranking, the tools or the grounding layer. Its risk is equally specific — inviting a model to
+   include more concrete values is exactly how fabrications start, and the current count is zero
+   across every run ever made. Any attempt must report the fabrication count first and the accuracy
+   second.
 2. **Decide what mean evidence relevance is for, and then fix corroboration to respect it.** It has
    moved the wrong way twice while the primary metric moved the right way, the second time by a
    third of its value: the precision pass adds two corroborations per claim unconditionally up to
@@ -1049,19 +1177,16 @@ alone.
    or stop treating a verified-but-unexpected citation as a miss — and make corroboration
    conditional on the claim's existing citations being weak rather than unconditional. The bounds
    already exist (`--max-corroborations`); what is missing is a rule for when to spend them.
-3. **Give a run record a provenance field, distinct from `systemVersion`.** Sharpened, because two
-   iterations of deferral have shown the original wording asked for the wrong thing. The real
-   problem is unchanged: every result record reports `systemVersion` `0.1.0` for the advanced system
-   across five iterations, so the artefacts on disk cannot tell you which iteration produced them.
-   But bumping `ADVANCED_VERSION` is not the fix — it names *behaviour*, and Iterations 4 and 5
-   changed none, so a bump would assert a difference that does not exist and stamp a new version on
-   results still valid under the old one. What is needed is a separate field — a commit sha, or an
-   iteration number — that answers "which code produced this?" without claiming "this behaves
-   differently". **Do it at the very start of the next measured iteration, before any run.** It
-   changes the run record's shape, which is exactly the kind of change that has to be paid for by a
-   real measurement rather than slipped in beside one: adding it today would break the byte-identity
-   property Iteration 5 just established, and that property is currently the only proof that two
-   iterations of product work left the pipeline alone.
+
+   Iteration 6 gives this a second reason to matter: mean evidence relevance was 0.4007 across the
+   expanded benchmark, and the failure analysis found citations attaching to import lines rather
+   than defining lines. Whether that is the metric being wrong or the citations being wrong is
+   currently unresolved, and it is the kind of question a 38-question dataset can now answer.
+3. **A third fixture, in a language neither current one uses.** Carried forward from the closed
+   item 1, because expanding the *questions* did not expand the *repositories*. Both fixtures are
+   still JavaScript and Python, so nothing yet tests whether the scout's term extraction
+   generalises past that vocabulary — and the multi-language category currently scores 0 of 2,
+   which is suggestive but is two questions, not a finding.
 4. **Then re-measure.** Hypothesis first, in
    [`docs/improvement-changelog.md`](docs/improvement-changelog.md), **before any code changes.**
    That ordering is the reason Iteration 1 could be rejected without argument and Iterations 2 and 3
@@ -1069,8 +1194,14 @@ alone.
    contradicted on the evidence rather than followed off a cliff. Iteration 5 broke it and says so
    in its own entry; the compensating control (the hypothesis still preceded the measurement, and
    the measurement could have failed) is a smaller thing than the rule, not a substitute for it.
+   Iteration 6 restored it in the strongest available form: it measured before writing a single
+   line of analysis code, and the measurement is what stopped it from writing any.
 
-Item 5 — *"give an analysis somewhere to live"* — is **closed** by Iteration 5: a SQLite adapter
+   When reporting, report **per set**. A combined average across a saturated set and a
+   discriminating one is the one number that can hide a regression, and it moves when the ratio
+   between the sets changes even though nothing about the system did.
+
+Item 5 — *"give an analysis somewhere to live"* — was **closed** by Iteration 5: a SQLite adapter
 behind the `AnalysisStore` seam, exactly as the item specified, with no change to the analysis. Two
 things it deliberately did not do, carried forward as the product layer's own list rather than the
 metric's:
@@ -1084,19 +1215,19 @@ metric's:
    number of analyses is unbounded by design, because a tool that silently discards the analysis you
    wanted is worse than one whose file grows. A retention policy is a decision for whoever has too
    many, not a default worth guessing at.
-7. **No test has ever rendered the dashboard.** `0.6.1` closed the cheap half of this: the shipped
-   files are now checked for the failures that need no DOM — does `app.js` parse, is every import
-   reached, does every id have a host, does every class have a rule. That is enough to catch the
-   whole class of defect that shipped in `0.6.0`, and it is not enough to catch the next one. Nothing
-   verifies that clicking a node opens the panel, that Escape returns focus to the chip that opened
-   the drawer, or that a phase event repaints the checklist — the interactions the last two
-   iterations were mostly *about*. The reason is a real trade: the project has no bundler and no
-   jsdom, and `ui.js` exists precisely so the decisions can be tested without a document. But
-   "testable in principle" was exactly the state eleven unreachable helpers were in. A single
-   headless-browser smoke test that loads the page, runs one analysis against a fixture and clicks
-   three things would be worth more than another fifty unit tests, and it is the first product-layer
-   item the next iteration should weigh — against the fact that it is the project's first
-   heavyweight dev dependency, which is not a small thing to spend.
+7. **No test had ever rendered the dashboard. Now one does, and it is not a browser.** `0.6.1`
+   closed the cheap half: the shipped files are checked for the failures that need no DOM — does
+   `app.js` parse, is every import reached, does every id have a host, does every class have a rule.
+   Iteration 6 closed the next half with `apps/web/test/browser-smoke.test.ts`, which executes the
+   shipped script against a jsdom document and drives the real markup the server serves.
+
+   What remains open is what jsdom cannot see. There is no layout, no paint, no CSS cascade and no
+   real network stack, so a control rendered off-screen, an element hidden by a stylesheet, a font
+   that never loads, or a behaviour that only appears under a real event loop all pass. The suite
+   proves the shipped script boots against the shipped markup and wires its handlers to elements
+   that exist — the class of defect that shipped in `0.6.0` — and it is **not** equivalent to a
+   browser test. A real headless browser remains the honest fix and remains the project's first
+   heavyweight dev dependency, which is still not a small thing to spend.
 
 8. **A cancelled run still finishes its pipeline.** `0.6.2` made a delete stop the *persistence* of
    a running analysis, which is the half that was corrupting state. The model calls already issued

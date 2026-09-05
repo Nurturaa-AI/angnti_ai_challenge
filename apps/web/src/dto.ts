@@ -25,6 +25,15 @@ import type {
  * The absent fields, for the record: `repositoryRoot`, the run record, the
  * trajectory, prompts, model text, tool arguments, tool results, the database
  * file, the schema version, and any path that is not relative to the workspace.
+ *
+ * Two of the three run identities are published here — `systemVersion` and
+ * `provenance` — because a reader looking at a report should be able to say which
+ * build produced it and where the run came from. Both are safe to publish by
+ * construction: the version is a package constant, and provenance is validated
+ * against a short slug pattern before it is ever persisted, so it cannot carry a
+ * path or a secret. The third identity, the benchmark version, is deliberately
+ * absent: it describes an evaluation dataset, and this API serves analyses rather
+ * than evaluations. Claiming one here would be inventing a fact about the run.
  */
 
 /** The largest text the evidence viewer will return for one artefact. */
@@ -48,6 +57,14 @@ export interface AnalysisSummaryDto {
 }
 
 export interface AnalysisDetailDto extends AnalysisSummaryDto {
+  /**
+   * The build that produced this analysis, or `null` if the record predates the
+   * column. `null` means *unrecorded* and is passed through as such; the running
+   * build's own version would be a plausible-looking lie about an older run.
+   */
+  systemVersion: string | null;
+  /** Where the run originated (`local-dev`, `ci-nightly`), or `null` as above. */
+  provenance: string | null;
   provider: string;
   focus: string | null;
   durationMs: number | null;
@@ -89,6 +106,8 @@ export function analysisDetailDto(record: AnalysisRecord): AnalysisDetailDto {
       name: record.repositoryName,
     },
     system: record.metadata.system,
+    systemVersion: record.metadata.systemVersion,
+    provenance: record.metadata.provenance,
     provider: record.metadata.provider,
     model: record.metadata.model,
     focus: record.metadata.focus,

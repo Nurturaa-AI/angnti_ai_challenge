@@ -1,6 +1,6 @@
 import path from "node:path";
-import { ADVANCED_SYSTEM_NAME, runAdvanced } from "@repo-arch/advanced";
-import { BASELINE_SYSTEM_NAME, runBaseline } from "@repo-arch/baseline";
+import { ADVANCED_SYSTEM_NAME, ADVANCED_VERSION, runAdvanced } from "@repo-arch/advanced";
+import { BASELINE_SYSTEM_NAME, BASELINE_VERSION, runBaseline } from "@repo-arch/baseline";
 import type { AdvancedPhase } from "@repo-arch/advanced";
 import type { BaselinePhase } from "@repo-arch/baseline";
 import {
@@ -31,6 +31,20 @@ import {
  */
 
 export const ANALYSIS_SYSTEMS: readonly string[] = [ADVANCED_SYSTEM_NAME, BASELINE_SYSTEM_NAME];
+
+/**
+ * The version of each system, by name.
+ *
+ * Read from the pipeline packages rather than restated, so it cannot drift from the
+ * version those packages actually report in a run record. It lives here because this
+ * module is already the one place that knows which systems exist, and because the web
+ * layer depends on this package alone — letting it import a version constant from
+ * `@repo-arch/advanced` is the same mistake as letting it import the pipeline.
+ */
+export const SYSTEM_VERSIONS: Readonly<Record<string, string>> = {
+  [ADVANCED_SYSTEM_NAME]: ADVANCED_VERSION,
+  [BASELINE_SYSTEM_NAME]: BASELINE_VERSION,
+};
 
 /** What a caller gets when it does not choose. */
 export const DEFAULT_ANALYSIS_SYSTEM: string = ADVANCED_SYSTEM_NAME;

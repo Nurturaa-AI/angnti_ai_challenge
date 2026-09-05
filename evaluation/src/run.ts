@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { ADVANCED_SYSTEM_NAME, ADVANCED_VERSION, runAdvanced } from "@repo-arch/advanced";
 import {
@@ -7,10 +8,15 @@ import {
 } from "@repo-arch/baseline";
 import {
   aggregate,
+  aggregateBenchmark,
   failedCase,
+  loadBenchmark,
   loadCases,
+  renderBenchmarkMarkdown,
   renderEvaluationMarkdown,
   scoreCase,
+  type Benchmark,
+  type BenchmarkRunReport,
   type CaseScore,
   type EvaluationReport,
   type LoadedCase,
@@ -21,6 +27,7 @@ import {
   formatError,
   loadExplorationBudget,
   loadPrecisionPolicy,
+  resolveProvenance,
   timestampSlug,
   writeJsonFile,
   writeTextFile,
@@ -45,10 +52,21 @@ import {
  * `RunRecord` with no indication of where it came from. That is what keeps the
  * comparison honest: the evaluator cannot score the advanced system differently,
  * because it cannot tell.
+ *
+ * Three identities are recorded with every run and none of them stands in for
+ * another: the **system version** (what code ran), the **provenance** (where in
+ * the development process the run originated) and the **benchmark version** (the
+ * dataset it was measured against). The benchmark manifest sits beside the cases
+ * directory; when it is absent — an ad-hoc case directory, a test fixture — the
+ * run still happens and produces the older report shape, which declares no
+ * benchmark rather than claiming one it did not use.
  */
 
 export const DEFAULT_CASES_DIR = "evaluation/cases";
 export const DEFAULT_RESULTS_DIR = "evaluation/results";
+
+/** The manifest filename, looked for beside the cases directory. */
+export const BENCHMARK_MANIFEST_NAME = "benchmark.json";
 
 /** Systems this harness can run. Adding one means adding a branch in `runSystem`. */
 export const EVALUABLE_SYSTEMS = [BASELINE_SYSTEM_NAME, ADVANCED_SYSTEM_NAME] as const;
@@ -79,13 +97,32 @@ export interface EvaluationRunOptions {
    * per-minute quota is the binding constraint rather than the model.
    */
   caseDelaySeconds?: number;
+  /**
+   * Where this run originated in the development process — `iteration-6-baseline`,
+   * `ci-nightly`. Falls back to `REPO_ARCHAEOLOGIST_PROVENANCE`, then to
+   * `unlabelled`. Never a system version and never a dataset version.
+   */
+  provenance?: string;
+  /**
+   * The benchmark manifest. Defaults to `benchmark.json` beside the cases
+   * directory. Pass `null` to run without one, which produces the older report
+   * shape rather than a report that claims a benchmark it did not use.
+   */
+  benchmark?: Benchmark | null;
   now?: () => Date;
   /** Progress sink. Defaults to silence, so library use prints nothing. */
   logger?: (message: string) => void;
 }
 
 export interface EvaluationRunOutput {
-  report: EvaluationReport;
+  /**
+   * A `BenchmarkRunReport` when a manifest was in play, an `EvaluationReport`
+   * otherwise. Both carry the same metrics computed by the same aggregator; the
+   * benchmark shape adds the three identities and the per-set split.
+   */
+  report: EvaluationReport | BenchmarkRunReport;
+  /** The same object as `report`, narrowed, or null when no manifest was used. */
+  benchmarkReport: BenchmarkRunReport | null;
   markdown: string;
   /** Paths written, relative to the working directory. */
   jsonPath: string;
@@ -106,11 +143,24 @@ export async function runEvaluation(options: EvaluationRunOptions): Promise<Eval
   const casesDir = options.casesDir ?? DEFAULT_CASES_DIR;
   const resultsDir = options.resultsDir ?? DEFAULT_RESULTS_DIR;
 
+  // Resolved before anything expensive happens: a malformed label should fail the
+  // run in the first millisecond, not after paying for thirty-eight questions.
+  const provenance = resolveProvenance(options.provenance);
+  const benchmark = resolveBenchmark(options, casesDir);
+
   const loaded = loadCases(casesDir, { filterIds: options.caseIds });
   const startedAt = now();
   const runId = `eval-${system}-${timestampSlug(startedAt)}`;
 
   log(`${runId}: ${loaded.length} case(s) from ${casesDir} against ${options.config.provider}/${options.config.model}`);
+  log(
+    `  system ${SYSTEM_VERSIONS[system] ?? "unknown"} · provenance ${provenance} · ` +
+      `benchmark ${
+        benchmark === null
+          ? `none (no ${BENCHMARK_MANIFEST_NAME} beside ${casesDir})`
+          : `${benchmark.name} ${benchmark.version}`
+      }`,
+  );
 
   // One client for the whole run, so token usage and cost accumulate against a
   // single provider/model pair rather than a per-case guess.
@@ -136,7 +186,10 @@ export async function runEvaluation(options: EvaluationRunOptions): Promise<Eval
     );
   }
 
-  const report = aggregate({
+  // One aggregation, either way. The benchmark report is the evaluation report
+  // plus identity and the per-set split — it does not recompute a metric, so a
+  // combined figure means the same thing whether or not a manifest was present.
+  const aggregateInput = {
     runId,
     system,
     systemVersion: SYSTEM_VERSIONS[system] ?? "unknown",
@@ -147,10 +200,21 @@ export async function runEvaluation(options: EvaluationRunOptions): Promise<Eval
     startedAt,
     finishedAt: now(),
     cases: scores,
-    caveats: buildCaveats(client, loaded),
-  });
+    caveats: buildCaveats(client, loaded, benchmark),
+  };
 
-  const markdown = renderEvaluationMarkdown(report);
+  let benchmarkReport: BenchmarkRunReport | null = null;
+  let report: EvaluationReport | BenchmarkRunReport;
+  let markdown: string;
+  if (benchmark === null) {
+    report = aggregate(aggregateInput);
+    markdown = renderEvaluationMarkdown(report);
+  } else {
+    benchmarkReport = aggregateBenchmark({ ...aggregateInput, benchmark, provenance });
+    report = benchmarkReport;
+    markdown = renderBenchmarkMarkdown(benchmarkReport);
+  }
+
   const jsonPath = path.join(resultsDir, `${runId}.json`);
   const markdownPath = path.join(resultsDir, `${runId}.md`);
   writeJsonFile(jsonPath, report);
@@ -161,7 +225,26 @@ export async function runEvaluation(options: EvaluationRunOptions): Promise<Eval
   writeJsonFile(path.join(resultsDir, `latest-${system}.json`), report);
   writeTextFile(path.join(resultsDir, `latest-${system}.md`), markdown);
 
-  return { report, markdown, jsonPath, markdownPath };
+  return { report, benchmarkReport, markdown, jsonPath, markdownPath };
+}
+
+/**
+ * Finds the benchmark manifest, which lives beside the cases directory.
+ *
+ * A missing manifest is not an error: an ad-hoc case directory is a legitimate
+ * way to run the harness, and the result then declares no benchmark rather than
+ * borrowing the identity of one it did not use. A manifest that *is* there and
+ * disagrees with the cases is an error, because that is the case where a
+ * denominator would silently be wrong.
+ *
+ * Deliberately silent — the caller reports the outcome on the identity line, so
+ * that the first line of the log stays the run header.
+ */
+function resolveBenchmark(options: EvaluationRunOptions, casesDir: string): Benchmark | null {
+  if (options.benchmark !== undefined) return options.benchmark;
+  const manifestFile = path.join(path.dirname(casesDir), BENCHMARK_MANIFEST_NAME);
+  if (!existsSync(manifestFile)) return null;
+  return loadBenchmark({ casesDirectory: casesDir, manifestFile });
 }
 
 interface CaseRunContext extends EvaluationRunOptions {
@@ -207,7 +290,11 @@ async function evaluateCase(entry: LoadedCase, context: CaseRunContext): Promise
   return scoreCase(entry.case, record);
 }
 
-function buildCaveats(client: LlmClient, loaded: readonly LoadedCase[]): string[] {
+function buildCaveats(
+  client: LlmClient,
+  loaded: readonly LoadedCase[],
+  benchmark: Benchmark | null,
+): string[] {
   const caveats: string[] = [];
   if (client.provider === "mock") {
     caveats.push(
@@ -220,6 +307,14 @@ function buildCaveats(client: LlmClient, loaded: readonly LoadedCase[]): string[
     caveats.push(
       `The dataset is small (${loaded.length} case(s), ${questionCount} question(s)). ` +
         "Percentages move in large steps; read them as directional, not as a benchmark.",
+    );
+  }
+  // A partial run is the easiest way to publish a misleading percentage, so it is
+  // said out loud rather than left to be inferred from a denominator.
+  if (benchmark !== null && questionCount !== benchmark.counts.total) {
+    caveats.push(
+      `This run covered ${questionCount} of the ${benchmark.counts.total} questions in ` +
+        `${benchmark.name} ${benchmark.version}. The percentages are over what ran, not over the benchmark.`,
     );
   }
   return caveats;

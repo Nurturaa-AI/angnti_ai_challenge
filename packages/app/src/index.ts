@@ -12,6 +12,7 @@
 export {
   ANALYSIS_SYSTEMS,
   DEFAULT_ANALYSIS_SYSTEM,
+  SYSTEM_VERSIONS,
   analyzeRepository,
   systemSupportsFocus,
   type AnalysisRun,

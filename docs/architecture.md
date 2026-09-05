@@ -43,6 +43,21 @@ Iteration 3's measured numbers forward — so it is checkable rather than argued
 directory, or on a `systemVersion` that moved without a re-measurement. `--compare a.json b.json`
 strips run ids and wall clock from two result files and diffs what the systems actually answered.
 
+Iteration 6 moved the guard in both directions at once, which is worth stating rather than
+burying. It is **stronger** in three places: the two frozen case files are now compared by content
+against the ref rather than merely watched for a diff entry, untracked files are included (a new
+file under a guarded directory used to be invisible), and the fixtures are checked through their
+tracked generator. It is **weaker** in exactly one: two named plumbing files are exempt —
+`evaluation/src/run.ts`, which has to thread the manifest and provenance through the harness, and
+`packages/evaluator/src/index.ts`, whose diff is a re-export list. Every scoring module either of
+them reaches is compared by content anyway.
+
+The exemption is per-file and never per-directory — a directory-shaped exemption is how a guard
+quietly stops guarding — and each exempt file carries its justification in the source and prints it
+on every run, so a reviewer sees the hole rather than inheriting it. Adding a *new* case file is
+allowed, since a new file cannot alter an existing one and the frozen two are content-checked
+regardless.
+
 ---
 
 ## `packages/shared` — the contract
@@ -601,6 +616,24 @@ cannot know which column it is about to ignore. In the other direction a single 
 payload costs that analysis its report, not the dashboard its list — every consumer already handles
 a `null` report, because a queued analysis has none either.
 
+That refusal is what made Iteration 6's identity columns a **migration** rather than a
+reinterpretation. `SCHEMA_VERSION` moved 1 → 2, adding `system_version` and `provenance`, and an
+existing database is upgraded on open. Both columns are nullable, and that nullability is the
+design: a row written by version 1 genuinely does not know which build produced it or where the run
+came from, so it reads back as *unrecorded* rather than being backfilled with a plausible value.
+`unlabelled` is the default for a *new* run whose operator supplied no label — a different fact,
+and one the row is entitled to assert.
+
+The cheaper alternatives were all wrong in the same way: overloading `systemVersion` to also carry
+provenance, keeping it only in memory so it vanishes on restart, or synthesising it at read time
+from whatever the row happens to look like. Each produces a stored history that answers a question
+it was never told the answer to.
+
+One duplication is deliberate here. `CREATE TABLE IF NOT EXISTS` is a no-op on a database that
+already has the table, so its DDL would never add the new columns; the schema is therefore stated
+twice — once for a database being created, once for one being upgraded — and that redundancy is
+what makes an existing file readable instead of quietly missing a column.
+
 ### Progress, without inventing any
 
 [`lifecycle.ts`](../packages/app/src/lifecycle.ts) holds five statuses and eight phases, and the
@@ -814,6 +847,8 @@ no filesystem access outside a resolved boundary.
 | [`score.ts`](../packages/evaluator/src/score.ts) | The four measures, per question, then per case. |
 | [`aggregate.ts`](../packages/evaluator/src/aggregate.ts) | Case scores → report metrics, usage, cost, caveats. |
 | [`report.ts`](../packages/evaluator/src/report.ts) | The Markdown summary. |
+| [`benchmark.ts`](../packages/evaluator/src/benchmark.ts) | The benchmark's identity, sets and categories — a metadata view over the cases. |
+| [`benchmark-report.ts`](../packages/evaluator/src/benchmark-report.ts) | Splits a scored report by set, category, difficulty, repository and evidence kind. |
 
 No model is involved in scoring. Matching is substring comparison over normalised text, which
 is a real limitation ([documented](evaluation.md#limitations)) and a deliberate trade: the
@@ -827,6 +862,39 @@ For the same reason, a case whose run *crashes* is scored zero across all its qu
 rather than dropped: [`failedCase`](../packages/evaluator/src/score.ts) keeps the question
 count as the denominator, records the error, and the report carries a caveat naming the
 failure.
+
+### The benchmark is a view, not a second dataset (Iteration 6)
+
+`benchmark.ts` sits *beside* the loader rather than inside it. `loadCases` still returns exactly
+what it always returned, and `scoreQuestion` still receives exactly what it always received; the
+benchmark layer reads the same case files a second time to answer a different question — which
+sets exist, which categories they cover, how the counts compare to what the manifest declares.
+
+That separation is what makes the metadata safe. `EvalCaseSchema` is a `z.object` and strips
+undeclared keys, so a challenge question's inline `category`, `difficulty`, `tags` and
+`evidenceRationale` are provably unreachable from the scorer: the object it is handed never
+contains them. A question cannot be scored more leniently for being labelled `hard`, and this is a
+property of the parser rather than of anyone's discipline.
+
+The frozen half is asymmetric on purpose. Regression Set v1's questions may not change, so they
+carry no inline metadata at all and their classification lives in the manifest's `annotations` map,
+keyed `caseId/questionId` — compound because ids like `q1-purpose` legitimately exist in both
+frozen files.
+
+`loadBenchmark()` accumulates every disagreement it finds — a case in no set, a declared fixture
+that no case uses, a question classified twice, an undeclared category, a count that does not
+match, a difficulty missing from the distribution — and throws them in one `EvaluationError` rather
+than one at a time. The manifest is a declaration; the case files are the dataset; a mismatch is a
+bug in whichever is wrong, and never a reason to edit a count.
+
+`evidenceKind()` classifies a question's expected evidence as `documentation`, `source`, `mixed` or
+`none`. It is the grouping that turned out to carry Iteration 6's signal, and it exists because a
+system that passes the documentation group and fails the source group has a *looking* problem
+rather than a *thinking* problem — two failures that look identical in a single accuracy number.
+
+`readReportIdentity()` returns `null` for a v1 report instead of a default. An Iteration 3 run
+predates this benchmark, and labelling it `v2` at read time would be inventing a fact about
+history in order to fill a column.
 
 ---
 
@@ -863,6 +931,69 @@ in milliseconds), identically for both.
 Reproducibility metadata on every report: run id, system, system version, provider, model,
 seed, thinking level, timestamps, duration, token usage, estimated cost where the price is
 known, Node version, and the case ids that ran.
+
+### Three identities (Iteration 6)
+
+A report now carries three separate labels, and the separation is the design:
+
+| Field | Answers | Owned by |
+| --- | --- | --- |
+| `systemVersion` | Which code ran? | the system under measurement |
+| `provenance` | Where did this run come from? | the operator, via `--provenance` |
+| `benchmark.version` | Which dataset was it measured against? | the manifest |
+
+None may stand in for another. Overloading `systemVersion` to also mean "this was the Iteration 6
+baseline run" is the cheap version of this, and it produces a table whose rows silently compare
+different things — two runs of the same code against different datasets look like a regression.
+
+Provenance is a real schema change rather than a reinterpretation: reports are `schemaVersion` 2,
+`SCHEMA_VERSION` in the analysis store is 2, and existing databases migrate. It is resolved by
+[`resolveProvenance`](../packages/shared/src/provenance.ts) — explicit flag, then
+`REPO_ARCHAEOLOGIST_PROVENANCE`, then `unlabelled` — and validated against
+`/^[a-z0-9][a-z0-9._/-]{0,63}$/` before anything binds a port or opens a store, so a shell
+expansion that produced `$(whoami) run` fails as a sentence rather than landing in a row and an
+HTTP body.
+
+`resolveBenchmark()` returns `null` when no manifest sits beside the case directory, and the report
+then declares no benchmark rather than claiming one it did not use. This is the same refusal as
+`readReportIdentity()`: a missing fact stays missing.
+
+---
+
+## Smoke gates — the entry points, executed (Iteration 6)
+
+`tsc --noEmit` and `node --check` both pass on an entry point that throws on line one. Three suites
+exist because that gap is where a broken start actually lives:
+
+| Suite | What it proves |
+| --- | --- |
+| [`apps/cli/test/cli-smoke.test.ts`](../apps/cli/test/cli-smoke.test.ts) | The real binary, spawned as a child process: help, every parse refusal, and one full `--mock` analysis that writes the files it says it wrote. |
+| [`apps/web/test/entry-smoke.test.ts`](../apps/web/test/entry-smoke.test.ts) | `main.ts` spawned with real flags — `.env` load, config and budget resolution, database location, store construction, bind order — then answered over TCP. |
+| [`apps/web/test/browser-smoke.test.ts`](../apps/web/test/browser-smoke.test.ts) | `public/app.js` executed against a jsdom document, driving the real DOM the server serves. |
+
+Both process suites run entirely on the offline mock provider and blank `GEMINI_API_KEY` in the
+child's environment: a developer machine that happens to have a key must never turn `pnpm test`
+into a paid run, and a smoke gate that costs money is a smoke gate people switch off.
+
+They assert wiring invariants rather than appearance — a URL that is answered, a flag that is
+refused, a label that reaches a stored row — so rewording a message or restyling a page does not
+break them. Two drift checks are included for the same reason: each entry point's `--help` output
+is compared against the flags its parser actually accepts, in both directions.
+
+### What the browser gate does not prove
+
+jsdom is not a browser. It has no layout, no paint, no real network stack and no CSS cascade, so
+this suite cannot see a control rendered off-screen, a stylesheet that hides an element, a font
+that never loads, or a behaviour that only appears under a real event loop. **It is not equivalent
+to a browser test and is not claimed to be.** What it does prove is that the shipped `app.js`
+parses, boots against the shipped markup, and wires its handlers to elements that exist — which is
+the class of failure that had actually shipped here before.
+
+A note worth keeping, because it cost time to find: `@types/jsdom` cannot be installed in this
+repository. `tsconfig.json` deliberately omits the DOM lib so that server code cannot reach for
+`document` by accident, and those types reintroduce DOM globals project-wide, silently undoing that
+boundary. The suite declares the handful of globals it needs in
+[`apps/web/test/jsdom.d.ts`](../apps/web/test/jsdom.d.ts) instead.
 
 ---
 

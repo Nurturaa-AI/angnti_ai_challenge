@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { RequestError, type AnalysisConfig, type CollectOptions, type ExplorationBudget, type LlmClient, type PrecisionPolicy } from "@repo-arch/shared";
+import { RequestError, resolveProvenance, type AnalysisConfig, type CollectOptions, type ExplorationBudget, type LlmClient, type PrecisionPolicy } from "@repo-arch/shared";
 import { buildArchitectureGraph } from "./architecture";
 import { AnalysisEventBus, PHASE_MESSAGES, logFailureMessage, safeFailureMessage } from "./lifecycle";
 import { buildAnalysisReport, type AnalysisReport } from "./report";
-import { analyzeRepository, DEFAULT_ANALYSIS_SYSTEM, systemSupportsFocus, type AnalysisSystem } from "./service";
+import { analyzeRepository, DEFAULT_ANALYSIS_SYSTEM, SYSTEM_VERSIONS, systemSupportsFocus, type AnalysisSystem } from "./service";
 import { projectEvidence } from "./store/projection";
 import { AnalysisNotFoundError } from "./store/types";
 import type { AnalysisPhase, AnalysisRecord, AnalysisStore } from "./store/types";
@@ -44,6 +44,13 @@ export interface AnalysisRunnerDependencies {
   budget?: ExplorationBudget | undefined;
   precisionPolicy?: PrecisionPolicy | undefined;
   collectOptions?: CollectOptions | undefined;
+  /**
+   * Where runs from this process originated: `local-dev`, `ci-nightly`,
+   * `iteration-6-baseline`. Defaults to `REPO_ARCHAEOLOGIST_PROVENANCE`, then to
+   * `unlabelled`. Recorded on every record, and never a substitute for the system
+   * version beside it.
+   */
+  provenance?: string | undefined;
   now?: (() => Date) | undefined;
   /** Where an unexpected failure is reported in full. Defaults to stderr. */
   logError?: ((message: string) => void) | undefined;
@@ -96,6 +103,15 @@ export class AnalysisRunner {
    * callers and the API surface already treat as the contract.
    */
   private readonly idPrefix: string;
+  /**
+   * Validated once, in the constructor.
+   *
+   * `resolveProvenance` rejects anything that is not a short slug, which matters
+   * because this value is persisted and then served: a shell mistake like
+   * `--provenance "$(cat .env)"` must fail at startup rather than becoming a row
+   * in the database and then a field in an API response.
+   */
+  private readonly provenance: string;
   /** Analyses this runner is executing right now. */
   private readonly live = new Set<string>();
   /** Of those, the ones whose record has stopped existing under them. */
@@ -105,6 +121,7 @@ export class AnalysisRunner {
     this.now = dependencies.now ?? ((): Date => new Date());
     this.logError = dependencies.logError ?? ((message: string): void => console.error(message));
     this.idPrefix = `${this.now().getTime().toString(36)}${randomUUID().slice(0, 4)}`;
+    this.provenance = resolveProvenance(dependencies.provenance);
   }
 
   /** True while this runner is executing the analysis. */
@@ -161,6 +178,11 @@ export class AnalysisRunner {
       repositoryPath: normalizeRequestedPath(request.repository),
       repositoryName: repositoryNameOf(request.repository, this.dependencies.workspaceRoot),
       system,
+      // Both recorded now rather than on completion, so that a run which fails
+      // still says which build produced it and where it came from — the two runs
+      // hardest to explain later are the ones that failed.
+      systemVersion: SYSTEM_VERSIONS[system],
+      provenance: this.provenance,
       provider: this.dependencies.config.provider,
       model: this.dependencies.config.model,
       focus: request.focus,

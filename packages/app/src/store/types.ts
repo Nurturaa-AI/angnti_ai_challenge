@@ -64,9 +64,26 @@ export interface StoredEvidenceSource {
   truncated: boolean;
 }
 
-/** Everything needed to open a record, minus the payloads. */
+/**
+ * Everything needed to open a record, minus the payloads.
+ *
+ * Three identities live here and none of them substitutes for another.
+ * `system` and `systemVersion` say what code ran. `provenance` says where the run
+ * came from in the development process — a label like `iteration-6-baseline` or
+ * `ci-nightly`, never a version and never a path. The third identity, the
+ * benchmark version, belongs to an evaluation run rather than to a single
+ * analysis, so it is recorded in the evaluation report instead of here.
+ *
+ * Both new fields are nullable because a row written before schema version 2
+ * genuinely does not carry them. `null` means *unrecorded*; it never means
+ * "unlabelled", which is a real label a run can have.
+ */
 export interface AnalysisMetadata {
   system: AnalysisSystem;
+  /** The version of the system that ran, or null for a pre-migration row. */
+  systemVersion: string | null;
+  /** Where this run originated, or null for a pre-migration row. */
+  provenance: string | null;
   provider: string;
   model: string;
   /** The scout focus the analysis was started with, if any. */
@@ -128,6 +145,10 @@ export interface NewAnalysis {
   repositoryPath: string;
   repositoryName: string;
   system: AnalysisSystem;
+  /** Recorded at creation, so even a failed run says which build produced it. */
+  systemVersion?: string | undefined;
+  /** Recorded at creation, for the same reason. */
+  provenance?: string | undefined;
   provider: string;
   model: string;
   focus?: string | undefined;

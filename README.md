@@ -7,7 +7,7 @@ know what it does, how it is put together, where the sharp edges are, and which 
 read first. Repo Archaeologist produces that briefing — and cites its sources, so you can
 check it instead of trusting it.
 
-> **Status: three measured iterations, one of them rejected. Iterations 4 and 5 are the product layer.**
+> **Status: four measured iterations, one of them rejected. Iterations 4 and 5 are the product layer.**
 > Iteration 1 — letting the model search and read files — **scored 7.1 points worse than the
 > baseline** and was rejected. Iteration 2 — making the search deterministic and running it
 > *before* the model gets a turn — **scored 21.4 points better**, 85.7 % against the baseline's
@@ -18,7 +18,11 @@ check it instead of trusting it.
 > export, durable analyses, live progress — and claim no benchmark movement. Iteration 5 was the
 > first to touch the measured path at all, by one observation callback, so it *checked* rather than
 > asserted that nothing changed: a byte-identity test in each system, and both offline evaluations
-> re-run and found identical to Iteration 4's question by question. See
+> re-run and found identical to Iteration 4's question by question. Iteration 6 is
+> **measurement only**: 100 % had left the benchmark unable to say anything, so it added 24 harder
+> questions beside the frozen 14 and measured the unchanged system — **100.0 % on the frozen set,
+> 29.2 % on the new one** — then declined to change the analysis, because the failure it found
+> names a lever the iteration was not allowed to pull. See
 > [`docs/improvement-changelog.md`](docs/improvement-changelog.md) for every number and the
 > diagnosis behind each.
 
@@ -99,6 +103,9 @@ pnpm evaluate:advanced
 # Evaluate offline, or one case at a time
 pnpm evaluate:baseline --mock
 pnpm evaluate:baseline --case case-001-orders-api
+
+# Label where a run came from, so a result is still interpretable in six weeks
+pnpm evaluate:advanced -- --provenance iteration-6-baseline
 ```
 
 A run writes three files: a Markdown briefing and the full JSON run record in
@@ -109,31 +116,51 @@ for tooling. The two systems write to separate `latest-` files and never overwri
 other's.
 
 `--help` lists every flag (`--model`, `--seed`, `--thinking`, `--max-output`, `--out`,
-`--cases`, `--case`, `--system`, `--case-delay`, `--quiet`, `--focus`, plus the ten
+`--cases`, `--case`, `--system`, `--case-delay`, `--quiet`, `--focus`, `--provenance`, plus the ten
 exploration-budget flags). `pnpm web -- --help` lists the server's own (`--root`, `--port`,
-`--host`, `--system`) and accepts the same model, budget, scout and precision flags, so a
-repository analysed from the browser runs under the same bounds as one analysed from the
-terminal. The only thing the web server writes is its own analysis database, which lives outside
-the analysed workspace — never inside it, where the analysis could see it and `git clean` could
-delete it.
+`--host`, `--system`, `--db`, `--provenance`) and accepts the same model, budget, scout and
+precision flags, so a repository analysed from the browser runs under the same bounds as one
+analysed from the terminal. The only thing the web server writes is its own analysis database,
+which lives outside the analysed workspace — never inside it, where the analysis could see it and
+`git clean` could delete it.
+
+Every run carries three separate labels, and none substitutes for another: `systemVersion` (which
+code ran), `provenance` (where the run came from — `--provenance`, else
+`REPO_ARCHAEOLOGIST_PROVENANCE`, else `unlabelled`), and, on an evaluation, the benchmark version
+it was measured against. Two runs of the same code against different datasets are not comparable,
+and one field cannot be asked to remember both.
 
 ## Test
 
 ```sh
-pnpm test         # 644 tests
+pnpm test         # 778 tests
 pnpm typecheck    # tsc --noEmit, strict
 ```
 
 The whole suite runs offline with the model stubbed: no API key, no network, no cost.
 
-Two of those tests are a different kind and are worth knowing about, because their absence
-cost an entire iteration. `apps/web/test/ui.test.ts` imports the browser's pure logic and
+Several of those tests are a different kind and are worth knowing about, because their absence
+cost an entire iteration each. `apps/web/test/ui.test.ts` imports the browser's pure logic and
 asserts what it decides; `apps/web/test/wiring.test.ts` reads the shipped `app.js`,
 `index.html` and `styles.css` as text and asserts the **seams** — that the entry point
 parses, that nothing imported is also declared locally or left uncalled, that every element
 id has a host, that every class has a rule. A unit test proves a module works. Only the
-second kind proves the product reaches it. Neither renders the page; see item 7 of
-[`## Next`](CHANGELOG.md#next) for what that still leaves unchecked.
+second kind proves the product reaches it.
+
+Three more actually *execute* the things you ship, because `tsc --noEmit` and `node --check` both
+pass on an entry point that throws on line one:
+
+| Suite | What runs |
+| --- | --- |
+| `apps/cli/test/cli-smoke.test.ts` | The real binary as a child process — help, every parse refusal, one full `--mock` analysis. |
+| `apps/web/test/entry-smoke.test.ts` | `main.ts` spawned with real flags, then answered over TCP. |
+| `apps/web/test/browser-smoke.test.ts` | `public/app.js` executed against a jsdom document. |
+
+Both process suites blank `GEMINI_API_KEY` in the child and use the offline provider: a machine
+that happens to have a key must not turn `pnpm test` into a paid run. The jsdom gate is **not** a
+browser — no layout, no paint, no CSS cascade — so it cannot see a control rendered off-screen or
+hidden by a stylesheet. It proves the shipped script boots against the shipped markup and wires its
+handlers to elements that exist, which is the failure that had actually shipped here.
 
 ```sh
 pnpm verify:measured --ref <git-ref>                    # what changed under the measured path
@@ -144,7 +171,8 @@ Every iteration since the first has carried a benchmark number forward by arguin
 measured path did not change. This turns the argument into a command with an exit code: it
 fails on any deletion under `advanced/src`, `baseline/src`, `evaluation/`,
 `packages/evaluator/` or `fixtures/`, on any change at all to the frozen ones, and on a
-`systemVersion` that moved without a re-measurement.
+`systemVersion` that moved without a re-measurement. The two frozen evaluation cases are compared
+by **content**, so a re-baseline is not a way past it.
 
 ---
 
@@ -225,8 +253,9 @@ this in full.
 
 **Yes. The first iteration made it worse; the second beat the baseline.**
 
-Both systems, same 14 questions, same model (`gemini-3.5-flash-lite`), same seed, same
-evaluator, same unmodified cases, neither run with a failed case:
+Both systems, the same 14 questions now known as Regression Set v1, same model
+(`gemini-3.5-flash-lite`), same seed, same evaluator, same unmodified cases, neither run with a
+failed case:
 
 | | Baseline | Iteration 1 (rejected) | Iteration 2 (kept) |
 | --- | --- | --- | --- |
@@ -263,6 +292,41 @@ Worth stating separately, because it is the result that carries across all three
 grounding layer held completely.** Zero fabrications and zero dropped citations every time — 31
 of 31 citations grounded on Iteration 2. Giving the model file access, and then handing it four
 more files it did not ask for, bought no invented quotations at all.
+
+### The benchmark ran out of room, so Iteration 6 built a harder one
+
+Iteration 3 took the advanced system to 14/14 and it stayed there. A benchmark you score full
+marks on has stopped measuring anything: it can report *not worse* and nothing else, and every
+subsequent decision would have been argued from intuition.
+
+So Iteration 6 added **24 new questions** across eleven categories — keeping the original 14 frozen
+and byte-identical — and measured the **unchanged** system against all 38 before touching any
+analysis code:
+
+| | Regression Set v1 (frozen) | Challenge Set v2 |
+| --- | --- | --- |
+| **Evidence-backed task accuracy** | **100.0 % (14/14)** | **29.2 % (7/24)** |
+| Answer accuracy | 100.0 % (14/14) | 41.7 % (10/24) |
+| Fabrications / dropped citations | 0 / 0 | 0 / 0 |
+
+Reported per set, never combined into one average — a single 55.3 % would have hidden both facts
+worth knowing. Nothing regressed, and the frozen half reproduces Iteration 3's run *exactly*, down
+to a mean evidence relevance of 0.4105 in both.
+
+The new questions found something the old ones structurally could not. Accuracy splits by where
+the evidence lives — 93.3 % when the answer is in documentation, 33.3 % when it is in source — and
+the obvious explanation is wrong. Two diagnostic runs recorded which files reached the model:
+**in 16 of 17 failures the evidence was already in context, un-truncated.** What is missing from
+the briefings is concrete literals the system was looking at — `4000`, `database_url`, `max: 10` —
+because a component claim is one sentence about what a module does, and a port number has no place
+in that sentence.
+
+**No analysis change was made.** The evidence names one lever, the synthesis prompt, which this
+iteration's constraints put out of scope; every other single-variable change available targets
+retrieval, and retrieval is not the bottleneck in 16 of 17 failures. Making one anyway would have
+been the intuitively-appealing, unmeasured change the whole method exists to prevent. The
+hypothesis is written down in [`docs/improvement-changelog.md`](docs/improvement-changelog.md) for
+the iteration that acts on it.
 
 ---
 
@@ -383,15 +447,15 @@ apps/cli/              Argument parsing, the three commands, exit codes
 apps/web/              HTTP server, routes, static assets, and the browser UI in public/
 baseline/              The baseline analyser: prompt, run loop, Markdown rendering
 advanced/              The exploring agent: prompt, scout phase, tool loop, budget
-evaluation/            The evaluation runner, plus cases/ and results/
+evaluation/            The evaluation runner, benchmark.json, plus cases/ and results/
 packages/shared/       Schemas, context collection, tools, grounding, LLM clients, IO
 packages/app/          The analysis core: service, runner, lifecycle, report, graph, Q&A, store, PDF
-packages/evaluator/    Case loading, matching, scoring, aggregation, reporting
+packages/evaluator/    Case loading, matching, scoring, aggregation, reporting, benchmark metadata
 fixtures/              Generated git repositories used by the cases (pnpm setup)
 reports/               Briefings from both systems (JSON + Markdown)
 trajectories/          What each run did, step by step
 docs/                  Architecture, evaluation method, improvement changelog
-scripts/               Fixture builder, and a structural smoke check for the PDF writer
+scripts/               Fixture builder, measured-path guard, and a structural check for the PDF writer
 ```
 
 [`docs/architecture.md`](docs/architecture.md) explains why the boundaries fall where they
@@ -403,18 +467,19 @@ to match the outcome.
 ## Limitations
 
 Known and deliberate, in [`docs/evaluation.md`](docs/evaluation.md#limitations). The short
-version: two cases is a tiny dataset, keyword matching is not comprehension,
+version: 38 questions is still a small dataset, keyword matching is not comprehension,
 `mustNotContain` is naive substring matching, and the baseline cannot answer any question
 whose evidence lives inside a source file.
 
-The most serious one is the dataset's, and it survived two iterations: each case's
-`expectedEvidence` was written when reconnaissance context was all any system had, so it lists
-only files the baseline could see. A system that cites the implementation instead of the README
-describing it is scored down for citing better evidence. **Both questions Iteration 2 still fails
-are this artefact** — the answers are correct and the citations are grounded in files that genuinely
-contain the answer; they are simply not the files the case names. Fixing it *after* seeing which
-files the advanced system chose would be fitting the ruler to the result, so it has been left
-alone twice and belongs to its own pre-registered iteration, re-run against both systems.
+The most serious one is the dataset's, and on the frozen half it is permanent: each of the original
+14 questions' `expectedEvidence` was written when reconnaissance context was all any system had, so
+it lists only files the baseline could see. A system that cites the implementation instead of the
+README describing it is scored down for citing better evidence. Fixing it *after* seeing which files
+the advanced system chose would be fitting the ruler to the result, so those lists have been left
+alone three times now. Iteration 6 took the other route instead: Challenge Set v2 names
+implementation files as expected evidence from the start, written before any system was run against
+it, which is why 14 of its 24 questions are source-backed — and why its scores are so much lower
+than the frozen set's.
 
 One more worth naming, since it is the number that moved the wrong way: mean evidence relevance is
 a precision measure averaged only over questions where it was measurable, so the two systems'

@@ -4,12 +4,14 @@ import path from "node:path";
 import {
   DEFAULT_EXPLORATION_BUDGET,
   DEFAULT_PRECISION_POLICY,
+  ConfigError,
   createLlmClient,
   type AnalysisConfig,
   type ExplorationBudget,
 } from "@repo-arch/shared";
 import {
   MEMORY_DATABASE,
+  SYSTEM_VERSIONS,
   SqliteAnalysisStore,
   type AnalysisReport,
   type AnalysisStore,
@@ -20,7 +22,7 @@ import {
 } from "@repo-arch/app";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { serializeJson, type ApiRequest, type ApiResponse } from "../src/api";
-import { createApi, type WebApi } from "../src/routes";
+import { createApi, type ApiDependencies, type WebApi } from "../src/routes";
 
 /**
  * The API, over the real pipeline, offline.
@@ -59,6 +61,8 @@ const stores: AnalysisStore[] = [];
 interface AnalysisView {
   id: string;
   createdAt: string;
+  systemVersion: string | null;
+  provenance: string | null;
   report: AnalysisReport;
   graph: ArchitectureGraph;
   questions: AnsweredQuestion[];
@@ -123,16 +127,29 @@ function writeRepository(root: string): void {
  * isolation assertions below depend on.
  */
 function newApi(budget: ExplorationBudget = DEFAULT_EXPLORATION_BUDGET): WebApi {
+  return newApiWith({ budget });
+}
+
+/**
+ * An API with one dependency varied.
+ *
+ * Separate from `newApi` so the common case stays a call with no arguments, and
+ * so a test that cares about one dependency does not have to restate the other
+ * seven — restating them is how a test ends up exercising a configuration the
+ * product never runs.
+ */
+function newApiWith(overrides: Partial<ApiDependencies> = {}): WebApi {
   const store = new SqliteAnalysisStore({ location: MEMORY_DATABASE, now: fixedClock() });
   stores.push(store);
   return createApi({
     workspaceRoot: workspace,
     config,
-    budget,
+    budget: DEFAULT_EXPLORATION_BUDGET,
     precisionPolicy: DEFAULT_PRECISION_POLICY,
     client: createLlmClient(config),
     store,
     now: fixedClock(),
+    ...overrides,
   });
 }
 
@@ -299,6 +316,45 @@ describe("GET /api/analysis/:id", () => {
     const again = ok<AnalysisView>(await call(api, "GET", `/api/analysis/${analysis.id}`));
     expect(again.report).toEqual(analysis.report);
     expect(again.graph).toEqual(analysis.graph);
+  });
+
+  it("says which build produced the analysis and where the run came from", async () => {
+    const detail = ok<Record<string, unknown>>(await call(api, "GET", `/api/analysis/${analysis.id}`));
+
+    // Three identities, and the two that belong to an analysis are here. The
+    // version is the advanced pipeline's own constant, not a restatement, so it
+    // cannot drift from the code that ran.
+    expect(detail["system"]).toBe("advanced");
+    expect(detail["systemVersion"]).toBe(SYSTEM_VERSIONS["advanced"]);
+    // Whatever this environment labels its runs, it is a slug and never a path.
+    expect(String(detail["provenance"])).toMatch(/^[a-z0-9][a-z0-9._/-]{0,63}$/);
+
+    // The third identity is not an analysis's to claim. A benchmark version
+    // describes an evaluation dataset, and this endpoint never ran one.
+    expect(detail).not.toHaveProperty("benchmarkVersion");
+    // And publishing an identity did not open a door to the rest of the run.
+    const serialised = serializeJson(detail);
+    expect(serialised).not.toContain(workspace);
+    for (const forbidden of ["repositoryRoot", "trajectory", "apiKey", "prompt"]) {
+      expect(serialised).not.toContain(forbidden);
+    }
+  });
+
+  it("labels a run whose provenance was given explicitly", async () => {
+    const labelled = newApiWith({ provenance: "iteration-6-baseline" });
+    const started = ok<AnalysisView>(
+      await call(labelled, "POST", "/api/analyze", { repository: "sparse" }),
+      201,
+    );
+    expect(started.provenance).toBe("iteration-6-baseline");
+    expect(started.systemVersion).toBe(SYSTEM_VERSIONS["advanced"]);
+  });
+
+  it("refuses to start at all rather than store a provenance label it cannot vouch for", () => {
+    // The value is persisted and then served, so a shell mistake like
+    // `--provenance "$(cat .env)"` has to fail here — before it becomes a row in
+    // the database and then a field in this very response.
+    expect(() => newApiWith({ provenance: "AKIA-SECRET-LOOKING-VALUE" })).toThrow(ConfigError);
   });
 
   it("reports a missing analysis as missing, and says why it might be gone", async () => {
