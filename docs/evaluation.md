@@ -531,6 +531,56 @@ the lever the evidence names is the synthesis prompt, which the iteration's cons
 scope, and every other available single-variable change targets retrieval that the 16/17 split shows
 is not the bottleneck.
 
+### Iteration 7 — the hypothesis was tested, and it was wrong
+
+Iteration 7 spent the lever Iteration 6 named. One variable changed — six form-level instructions
+appended to the synthesis prompt, telling the model to keep a fact and its identifier in the same
+sentence rather than splitting them across claims. Everything else was held: same model, same seed,
+same thinking level, same 38 questions, same scorer, same fixtures, same tools, same budgets.
+
+| | Regression Set v1 (frozen) | Challenge Set v2 | Combined |
+| --- | --- | --- | --- |
+| Control run | `eval-advanced-2026-09-05T01-35-25Z` | same run | same run |
+| Treatment run | `eval-advanced-2026-09-05T17-58-05Z` | same run | same run |
+| **Evidence-backed accuracy** | **100.0 % → 100.0 %** | **29.2 % (7/24) → 25.0 % (6/24)** | **55.3 % → 52.6 %** |
+| Answer accuracy | 100.0 % → 100.0 % | 41.7 % (10/24) → 41.7 % (10/24) | 63.2 % → 63.2 % |
+| Unsupported answers | 0 → 0 | 3 → 4 | 3 → 4 |
+| Fabrications / dropped citations | 0 / 0 → 0 / 0 | 0 / 0 → 0 / 0 | 0 / 0 → 0 / 0 |
+| Mean evidence relevance | 0.4105 → 0.3781 | — | 0.4007 → 0.3730 |
+
+Provenance `iteration-6-baseline` → `iteration-7-synthesis-experiment`; `systemVersion` 0.1.0 in
+both, because the treatment was never kept. The acceptance threshold was **+8 pp** on Challenge
+evidence-backed accuracy. The measurement is **−4.2 pp**. The treatment is **rejected**.
+
+**Exactly one question of 38 changed outcome, and it changed the wrong way.**
+`challenge-v2-orders-q03` went PASS → UNCITED: the instruction written to consolidate a fact and its
+identifier into one claim caused dispersal on the one case that was already getting it right. No
+question was recovered.
+
+The mechanism was confirmed at the token level and was still the wrong explanation. `pyflow-q04`
+recovered the literal `insert` the control had dropped — the instruction did what it was written to
+do — and the question still failed, because it also requires one of `append` / `history` /
+`every run` / `new row` / `accumulat`. Getting the literal into the sentence is not the same as
+having established what the code does with it.
+
+Of the four groupings, only one moved: **`cross-file-reasoning` 2/3 → 1/3**, with source-evidence
+questions 4/15 → 3/15 and hard questions 4/12 → 3/12. Everything else is flat, question for
+question. The single category that moved is the one the treatment targeted, and it moved down.
+
+**What the negative result establishes.** "The expected evidence was in context" — Iteration 6's
+16-of-17 finding — is a much weaker claim than "the model had established the fact". Reading a line
+into the ledger makes it citable; it does not make the model know what the line means for a question
+it cannot see. Synthesis here is deliberately question-blind: the model writes one briefing, and the
+scorer later asks 19 questions of it. A prompt cannot instruct a writer to organise a paragraph
+around a question that is not in the prompt. Three of the 17 failures are also structurally out of
+reach of any prompt — `selectClaims` emits one claim per dependency entry, so a question needing two
+dependency names in a single claim cannot be satisfied by better writing.
+
+Cost of the negative result: one paid run, 1m29s, $0.069218 (+4.8 % over control on +8.2 % output
+tokens). The full hypothesis — written before the code, so the result could be judged rather than
+rationalised — and the per-case table are in the
+[improvement changelog](improvement-changelog.md).
+
 <a name="limitations"></a>
 ## Limitations
 
