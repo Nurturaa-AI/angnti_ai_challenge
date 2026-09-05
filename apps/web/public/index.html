@@ -55,7 +55,16 @@
       </nav>
 
       <main id="main" tabindex="-1">
+        <!--
+          The shell's own empty state, replaced by `render()` the moment `app.js` boots.
+
+          It uses the same `.empty` shape the section states use rather than a second one
+          of its own — there is one empty-state pattern in this product and this is it —
+          and it says what is true before any script has run: nothing has been asked for
+          yet.
+        -->
         <section class="empty" id="placeholder">
+          <p class="empty-eyebrow">Repo Archaeologist</p>
           <h1>Show me where you found it.</h1>
           <p>
             Pick a repository and run an analysis. Every claim on the dashboard carries the citations
@@ -63,18 +72,28 @@
           </p>
         </section>
       </main>
-    </div>
 
-    <aside class="drawer" id="drawer" hidden aria-label="Evidence">
-      <header>
-        <div>
-          <span class="drawer-eyebrow" id="drawer-eyebrow">Evidence</span>
-          <h2 id="drawer-title">&nbsp;</h2>
-        </div>
-        <button class="ghost" id="drawer-close" type="button" aria-label="Close evidence">&times;</button>
-      </header>
-      <div class="drawer-body" id="drawer-body"></div>
-    </aside>
+      <!--
+        The evidence drawer.
+
+        Inside `.layout`, after `<main>`, because that is what makes it share the row
+        rather than float over it: while it is open the workspace is narrower, and while
+        it is `hidden` — which is most of the time — it is not in the layout at all. It
+        was a viewport-fixed panel over the right-hand third of the page, top bar
+        included, and it was on screen from boot because `.drawer { display: flex }` beat
+        the `hidden` attribute. See the `[hidden]` rule at the top of `styles.css`.
+      -->
+      <aside class="drawer" id="drawer" hidden aria-label="Evidence">
+        <header>
+          <div>
+            <span class="drawer-eyebrow" id="drawer-eyebrow">Evidence</span>
+            <h2 id="drawer-title">&nbsp;</h2>
+          </div>
+          <button class="ghost" id="drawer-close" type="button" aria-label="Close evidence">&times;</button>
+        </header>
+        <div class="drawer-body" id="drawer-body"></div>
+      </aside>
+    </div>
 
     <!--
       The visible toast, and the two announcements beside it.

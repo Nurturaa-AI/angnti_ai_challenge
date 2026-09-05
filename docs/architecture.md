@@ -803,6 +803,7 @@ So there are two kinds of test here on purpose:
 | --- | --- | --- |
 | [`ui.test.ts`](../apps/web/test/ui.test.ts) | imports the module | the decisions are right |
 | [`wiring.test.ts`](../apps/web/test/wiring.test.ts) | reads the shipped files as text | the product reaches them |
+| [`browser-smoke.test.ts`](../apps/web/test/browser-smoke.test.ts) | executes `app.js` against a jsdom document | the script boots and its handlers run |
 
 `wiring.test.ts` asserts what needs no DOM: both modules parse (`node --check`, which is the 40 ms
 check that would have caught the failure), no imported name is also declared locally, no imported
@@ -812,9 +813,26 @@ addressed as `/api/analyses/:id/evidence/:evidenceId` rather than through a glob
 those corresponds to a defect that shipped — the unused-import check alone was hiding eleven working,
 tested, unreachable features.
 
-Neither kind renders the page. That is the layer's real remaining gap and it is recorded as such,
-not as a plan: nothing verifies that clicking a node opens its panel or that Escape returns focus to
-the chip that opened the drawer.
+The third kind arrived with Iteration 6 and closes the interaction half: `app.js` is evaluated
+against a jsdom document built from the markup the server actually serves, talking to the real
+routes over a real socket, so Escape returning focus to the chip that opened the drawer is now
+asserted rather than hoped for.
+
+**What none of the three can see is the cascade, and that is where the layer's worst product defect
+was hiding.** `[hidden] { display: none }` is a user-agent rule, so `.drawer { display: flex }`
+outranked it and the evidence drawer painted over half the workspace on every load, from boot,
+empty. jsdom resolves the `hidden` property ahead of the cascade, so `getAttribute("hidden")`
+reported a drawer opening and closing correctly for as long as the defect existed. It took a real
+headless Chrome — `getBoundingClientRect` and `getComputedStyle` over the DevTools protocol — and
+it was visible in the first screenshot.
+
+The structural lesson is about the shape of these gates, not about the bug. Each of the three
+inspects the product through a different substitute for a browser, and the substitutes share a
+blind spot: none of them resolves a stylesheet. So the layout facts this product depends on are
+gated as *text* — `wiring.test.ts` asserts that the `[hidden]` reset exists and that no `display`
+declaration outranks it — which catches a regression in the rule while proving nothing about the
+pixels. A geometric gate is the honest fix and is item 7 of the changelog's `## Next`; what stands
+in the meantime is a stylesheet grep and a documented gap.
 
 ### Security boundaries, in one place
 

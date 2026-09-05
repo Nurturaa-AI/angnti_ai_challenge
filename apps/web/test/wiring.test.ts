@@ -211,6 +211,218 @@ describe("every class and token the app applies has a rule", () => {
   });
 });
 
+/**
+ * The `hidden` attribute, against the stylesheet that has to let it work.
+ *
+ * `<aside class="drawer" id="drawer" hidden>` and `.drawer { display: flex }` are both
+ * correct on their own and contradict each other in a browser: `[hidden] { display: none }`
+ * comes from the user-agent stylesheet, and *any* author declaration outranks the entire
+ * user-agent origin regardless of specificity. So the evidence drawer — a panel the page
+ * opens on demand — was painted over the right-hand third of the workspace from boot, on
+ * every load, empty, covering the top bar; `openEvidence` had nothing to reveal and
+ * `closeDrawer` nothing to put away.
+ *
+ * Neither of the other two kinds of test here could see it. `browser-smoke.test.ts` runs
+ * the real page, but jsdom resolves `hidden` ahead of the cascade, so its
+ * `getAttribute("hidden")` assertions passed against a drawer that never closed — and it
+ * does not apply the stylesheet at all. `ui.test.ts` imports pure functions and has no
+ * document. A layout defect that only a rendering engine can observe is exactly the gap
+ * this file exists for, so it is checked here, as text.
+ */
+describe("an element the page hides is actually hidden", () => {
+  /** Every element that carries `hidden` in the shell, with the classes it also carries. */
+  const hideable = [...indexHtml.matchAll(/<\w+([^>]*\bhidden\b[^>]*)>/g)].map((match) => {
+    const attributes = match[1] ?? "";
+    return {
+      id: /\bid="([\w-]+)"/.exec(attributes)?.[1] ?? "(no id)",
+      classes: (/\bclass="([^"]*)"/.exec(attributes)?.[1] ?? "").split(/\s+/).filter((name) => name !== ""),
+    };
+  });
+
+  /**
+   * `selector { body }` pairs, comments discarded and at-rules descended into.
+   *
+   * A regex over the whole file will not do here. The comments in `styles.css` quote CSS
+   * — including the two rules this check is about — and would be read as rules, and the
+   * narrow form of the drawer lives inside a `@media` block, so a parser that stopped at
+   * the first `{` would skip the one selector most worth reading.
+   */
+  const rules = ((css: string): { selector: string; body: string }[] => {
+    const source = css.replace(/\/\*[\s\S]*?\*\//g, "");
+    const found: { selector: string; body: string }[] = [];
+    let prelude = "";
+    for (let at = 0; at < source.length; at += 1) {
+      const character = source[at];
+      if (character === "}") {
+        prelude = "";
+        continue;
+      }
+      if (character !== "{") {
+        prelude += character;
+        continue;
+      }
+      const head = prelude.trim();
+      prelude = "";
+      // `@media`, `@supports`: a block of rules rather than a rule. Fall through into it.
+      if (head.startsWith("@")) continue;
+      let depth = 1;
+      let end = at + 1;
+      while (end < source.length && depth > 0) {
+        if (source[end] === "{") depth += 1;
+        else if (source[end] === "}") depth -= 1;
+        end += 1;
+      }
+      found.push({ selector: head, body: source.slice(at + 1, end - 1) });
+      at = end - 1;
+    }
+    return found;
+  })(stylesCss);
+
+  it("finds the elements the page opens and closes", () => {
+    // The drawer, the progress host and the status bar. If this drops to nothing the
+    // checks below are vacuous rather than passing.
+    expect(hideable.map((element) => element.id).sort()).toEqual(["drawer", "progress", "status"]);
+  });
+
+  /**
+   * The blanket fix. `!important` is what makes it a fix rather than a race: the next
+   * `display` written against one of these elements will be written by someone who has
+   * not read any of this.
+   */
+  it("resets [hidden] with a rule no author declaration can outrank", () => {
+    const reset = rules.find((rule) => rule.selector === "[hidden]");
+    expect(reset).toBeDefined();
+    expect(reset?.body.replace(/\s+/g, " ")).toContain("display: none !important");
+  });
+
+  /**
+   * And the specific one, because a blanket rule is easy to delete by accident. A
+   * `display` aimed at a hideable element has to say what it does about `hidden` — in
+   * practice `.drawer:not([hidden])`, which reads as "the layout it has when it is open".
+   *
+   * Aimed *at* it: the subject of the selector, which is the rightmost compound. A
+   * `display` on `.drawer > header` styles a child, and a child of a `display: none`
+   * element is not rendered whatever it asks for; a `display` on a `::before` or
+   * `::after` generates a box inside the element and is the same story. Neither can
+   * resurrect the parent, and flagging them would make this check noise.
+   */
+  it.each(hideable.flatMap((element) => element.classes.map((name) => [element.id, name] as const)))(
+    "#%s: no unguarded display on .%s",
+    (_id, className) => {
+      const aimsAt = (selector: string): boolean =>
+        selector
+          .split(",")
+          .filter((part) => !part.includes("::"))
+          .map((part) => part.trim().split(/[\s>+~]+/).filter(Boolean).pop() ?? "")
+          .some((subject) => new RegExp(`\\.${className}(?![\\w-])`).test(subject));
+
+      const unguarded = rules
+        .filter((rule) => aimsAt(rule.selector))
+        .filter((rule) => /(^|[;{\s])display\s*:/.test(rule.body))
+        .filter((rule) => !rule.selector.includes("[hidden]"))
+        .map((rule) => rule.selector);
+      expect(unguarded).toEqual([]);
+    },
+  );
+});
+
+/**
+ * §15: one empty state, not one per section.
+ *
+ * `render()` grew a second `.empty` block beside the shell's, both saying the same
+ * generic sentence whichever section had been asked for — which is how `#architecture`,
+ * the primary workspace, came to greet a reader with a landing page. The copy is per
+ * section now and the shape is not: one builder, one class, one place to change how an
+ * empty workspace looks. Counting the class is a cheap way to notice the third one.
+ */
+describe("the empty state has one implementation", () => {
+  it("builds .empty in exactly one place in app.js", () => {
+    expect(matchAll(appJs, /class: "(empty)"/g)).toEqual(["empty"]);
+  });
+
+  it("gives each section its own words rather than one shared sentence", () => {
+    // Read out of `ui.js`, so adding a tenth section fails here until it has been given
+    // something to say — rather than silently falling back to the overview's sentence.
+    const sections = matchAll(uiJs.slice(uiJs.indexOf("export const SECTIONS")), /\{ id: "([\w-]+)"/g);
+    expect(sections.length).toBeGreaterThan(5);
+    const table = appJs.slice(appJs.indexOf("const NOTHING_OPEN = {"));
+    for (const section of sections) expect(table).toContain(`${section}: {`);
+  });
+});
+
+describe("the destructive control is not the default one", () => {
+  const armed = appJs.slice(appJs.indexOf("function deleteControl("), appJs.indexOf("async function deleteAnalysis("));
+
+  /**
+   * Arming the confirm step used to focus *"Delete for good"*. The armed row replaces
+   * the button the user had just activated, so an Enter already in flight — or a second
+   * one from a keyboard user who reached Delete deliberately — destroyed an analysis and
+   * its evidence. A confirmation whose destructive half is what the next keypress fires
+   * is a speed bump wearing a safeguard's clothes.
+   */
+  it("moves focus to Cancel rather than to the delete confirmation", () => {
+    expect(armed).toContain(".analysis-cancel");
+    expect(armed).not.toMatch(/querySelector\("\.analysis-confirm"\)\?\.focus\(\)/);
+    const focused = /querySelector\("\.([a-z0-9-]+)"\)\?\.focus\(\)/.exec(armed);
+    expect(focused?.[1]).toBe("analysis-cancel");
+  });
+
+  /** Source order is the tab order and the reading order: safe control first in both. */
+  it("puts Cancel ahead of the confirmation in the DOM", () => {
+    const cancel = armed.indexOf("analysis-cancel");
+    const confirm = armed.indexOf("analysis-confirm bad-button");
+    expect(cancel).toBeGreaterThan(-1);
+    expect(confirm).toBeGreaterThan(-1);
+    expect(cancel).toBeLessThan(confirm);
+  });
+});
+
+describe("painting does not fetch", () => {
+  /** The body of a top-level `function name(...)`, up to the next one. */
+  const bodyOf = (name: string): string => {
+    const start = appJs.indexOf(`\nfunction ${name}(`);
+    expect(start, `${name} should be a top-level function in app.js`).toBeGreaterThan(-1);
+    const rest = appJs.slice(start + 1);
+    const next = rest.search(/\n(?:async function|function|const|\/\*\*) /);
+    return next === -1 ? rest : rest.slice(0, next);
+  };
+
+  /**
+   * `render()` is called from a hashchange, a graph toggle, a stream event and four
+   * request handlers. Fetching from inside it meant every one of those issued an HTTP
+   * `GET` for the analysis list, un-awaited: a rejection with nowhere to go, and — as
+   * the browser smoke suite found — a promise still resolving against a document that
+   * had gone away. The callers that change the list `await loadAnalyses()` themselves.
+   */
+  it("keeps the list fetch out of render()", () => {
+    const render = bodyOf("render");
+    expect(render).toContain("renderAnalysisList()");
+    expect(render).not.toContain("loadAnalyses");
+  });
+
+  /** Same rule, one level down: the row painter must not fetch either. */
+  it("keeps the list fetch out of renderAnalysisList()", () => {
+    const list = bodyOf("renderAnalysisList");
+    expect(list).toContain("state.analyses");
+    // The error state's retry button is the one permitted mention, and it is a
+    // handler rather than a call made while painting.
+    for (const mention of matchAll(list, /(.{0,6}loadAnalyses\(\))/g)) {
+      expect(mention.trim()).toBe("void loadAnalyses()");
+    }
+  });
+
+  /**
+   * Every un-awaited `loadAnalyses()` in the file is an event handler. A bare
+   * `loadAnalyses()` inside an async path is a fetch nobody waits for and whose
+   * failure nobody sees, which is the defect this whole block exists for.
+   */
+  it("awaits the list fetch everywhere it is not a handler", () => {
+    for (const call of matchAll(appJs, /([\w.>= ]{0,10})loadAnalyses\(\)/g)) {
+      expect(call.trim() === "" || /await |void |function |\* /.test(call)).toBe(true);
+    }
+  });
+});
+
 describe("what the browser is allowed to ask for", () => {
   const routes = [
     ...matchAll(appJs, /`(\/api\/[^`]*)`/g),

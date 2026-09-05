@@ -157,10 +157,21 @@ pass on an entry point that throws on line one:
 | `apps/web/test/browser-smoke.test.ts` | `public/app.js` executed against a jsdom document. |
 
 Both process suites blank `GEMINI_API_KEY` in the child and use the offline provider: a machine
-that happens to have a key must not turn `pnpm test` into a paid run. The jsdom gate is **not** a
-browser — no layout, no paint, no CSS cascade — so it cannot see a control rendered off-screen or
-hidden by a stylesheet. It proves the shipped script boots against the shipped markup and wires its
-handlers to elements that exist, which is the failure that had actually shipped here.
+that happens to have a key must not turn `pnpm test` into a paid run.
+
+The jsdom gate is **not** a browser — no layout, no paint, no CSS cascade — so it cannot see a
+control rendered off-screen or hidden by a stylesheet. It proves the shipped script boots against
+the shipped markup and wires its handlers to elements that exist, which is the failure that had
+actually shipped here.
+
+That distinction is not a caveat, it is a defect this project shipped. The first time a real
+headless Chrome was pointed at the dashboard, the evidence drawer was painting over half the
+workspace from boot — `.drawer { display: flex }` outranks the user-agent `[hidden]` rule, and
+jsdom resolves `hidden` ahead of the cascade, so both suites reported a drawer that opened and
+closed correctly while a browser showed one that never shut. Fixed in `Unreleased`, along with the
+`render()` call that issued an un-awaited HTTP `GET` on every repaint. **There is still no
+checked-in browser gate**, and the layout facts in this repository are asserted as stylesheet text
+rather than measured; see item 7 of [`CHANGELOG.md`](CHANGELOG.md#next) for what one would cover.
 
 ```sh
 pnpm verify:measured --ref <git-ref>                    # what changed under the measured path

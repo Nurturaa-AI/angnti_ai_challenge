@@ -5,7 +5,113 @@ All notable changes to Repo Archaeologist. Format loosely follows
 
 ## [Unreleased]
 
-Nothing yet. See [`## Next`](#next) for what the following iteration has to address.
+**The dashboard, looked at in a real browser for the first time.**
+
+No measured behaviour changed: no prompt, no tool, no scorer, no benchmark. Every number in
+`0.7.0` still stands, and nothing here was re-measured because nothing here is on the measured
+path. What changed is the product layer, and the reason it could change is that the layout was
+finally *observed* rather than asserted — headless Chrome over the DevTools protocol, driving
+the shipped page against the real server.
+
+### Fixed — the drawer was on screen from boot, over half the page
+
+`[hidden] { display: none }` is a user-agent rule, and any author declaration outranks the whole
+user-agent origin however weak its selector. `.drawer { display: flex }` therefore defeated
+`<aside class="drawer" hidden>`, so the evidence drawer — a `position: fixed` panel over the
+right-hand third of the viewport, top bar included — painted empty over the workspace on every
+load. `drawer.hidden = false` had nothing to do and `closeDrawer` nothing to undo.
+
+- **`[hidden] { display: none !important }`**, declared once near the top of the stylesheet, and
+  `.drawer`'s flex column moved to `:not([hidden])` so the attribute keeps the last word.
+- **The drawer is now a sibling of `<main>` inside `.layout`.** Where it docks it takes its width
+  from the row and the workspace reflows into what is left. Verified in Chrome at 1440×900:
+  `main` goes 1224px → 835px, the drawer takes 389px beside it, both at `y=74` below the top bar.
+- **Below 1180px it overlays instead**, positioned against `.layout` rather than the viewport, so
+  it cannot reach over the top bar. Verified at 1100×800: `position: absolute`, `y=74`.
+- **Nothing in the suite could see any of this.** jsdom resolves `hidden` ahead of the cascade, so
+  `getAttribute("hidden")` reported an open-and-shut drawer while a browser showed one that never
+  shut. `wiring.test.ts` now gates the rule as stylesheet text, which is the assertion that was
+  actually available.
+
+### Fixed — `render()` fetched, and nobody awaited it
+
+`render()` opened with `void loadAnalyses()`, so every repaint issued an HTTP `GET` for the
+analysis list: a section change, a diagram/outline toggle, an answered question, every terminal
+stream event. The docstring on `loadAnalyses` had argued against exactly this since Iteration 5
+without the call ever being removed.
+
+Un-awaited was the worse half — a failed list fetch during a repaint had nowhere to report, and a
+repaint late in the page's life left a promise resolving against a document that was going away.
+That is what the browser suite caught, as an unhandled rejection rather than a failed assertion:
+`renderAnalysisList` reaching for `document` after the window had closed.
+
+- **`render()` paints and fetches nothing.** The five events that can change the list each
+  `await loadAnalyses()` themselves — a run started, one opened, one deleted, one reaching a
+  terminal state, and a question answered, which changes a row's question count and was the one
+  the old fire-and-forget call had been quietly covering.
+- **Three gates in `wiring.test.ts`**, verified by reintroducing the defect and watching them fail.
+
+### Fixed — the delete confirmation focused the destructive button
+
+Closes item 10 of the previous `## Next`. Arming the two-step confirm moved focus to *"Delete for
+good"*, and arming replaces the button the user just activated — so an Enter already on its way
+down destroyed an analysis and its evidence. A confirmation whose destructive half is what the
+next keypress fires is a speed bump wearing a safeguard's clothes.
+
+*Cancel* now takes the focus **and** comes first in source order, which is the tab order and the
+screen-reader reading order too: all three ways in favour the safe control. Gated twice — in
+`wiring.test.ts` as source, and in `browser-smoke.test.ts` by clicking the real Delete button and
+asserting `document.activeElement`, so a focus call that finds nothing to focus fails. Confirmed
+in Chrome: `activeElement` is `analysis-cancel`.
+
+### Changed — the empty state, per section
+
+`#architecture` with nothing open answered with the overview's landing copy, so the view the
+product is named for was the one view that never showed anything. There were two `.empty`
+implementations and room for nine.
+
+- **One `emptyState()` shape**, plus a `NOTHING_OPEN` table with a sentence per section saying what
+  that section *would* show. `wiring.test.ts` counts the class to keep it at one, and reads
+  `SECTIONS` out of `ui.js` so a tenth section fails the suite until it has been given words.
+- **The newest finished analysis is offered as a one-click action**, and opened on boot when one
+  exists. The store is durable, so the second visit is the common one, and arriving at a saved
+  workspace to be shown a landing page with the analysis collapsed in a sidebar made
+  `#architecture` a brochure. `GET` only; it starts nothing.
+- **`render()` is called at the end of `boot()`.** `renderNav()` runs only from `render()`, so on a
+  cold load the section list was an empty `<ul>` and the only route to `#architecture` was to type
+  it — which is how the primary workspace came to be reached by URL and greeted with a landing page.
+
+### Changed — the citation chips say what they do
+
+Each chip is a disclosure button: `aria-controls="drawer"`, `aria-expanded` tracking whether the
+drawer is showing *that* citation, and a second click on the open chip closes it. The open chip is
+styled off `aria-expanded` rather than a class, so there is one fact and not two. Chips are synced
+in place rather than through `render()`, because a citation opening is not a reason to throw away
+the diagram's pan and zoom or the reader's scroll position.
+
+Two races closed with it: a slow evidence fetch no longer paints over a newer request or a closed
+drawer, and opening a second citation from inside the drawer no longer records the drawer's own
+close button as the place Escape should return focus to.
+
+### Changed — the sidebar was a wall of 9px prose
+
+Every row printed its full summary, so eight rows of three-line text at 10px had no shape to scan.
+The summary is now earned rather than given — the open row, a running one (where it is the live
+phase), and a failed one (where it is the reason) — and clamped to three lines. Nothing was moved
+behind a hover: a control a keyboard user cannot see until they have focused it is one they cannot
+find.
+
+### Added — a browser gate that is a browser
+
+`browser-smoke.test.ts` gains the delete-focus assertion; `wiring.test.ts` gains five gates. Both
+still run offline with no new dependency.
+
+**The verification that found these defects is not in the suite, and should be.** It was headless
+Chrome driven over CDP by a throwaway script — real layout, real cascade, real geometry. Every
+layout claim above is quoted from it. That it was a scratch file is the honest limitation: the
+`[hidden]` defect shipped in `0.6.0`, survived two suites written specifically to catch it, and
+was found the first time a browser looked at the page. See item 7 of `## Next`, now narrowed to
+one concrete thing.
 
 ## [0.7.0] — 2026-09-05
 
@@ -1226,8 +1332,25 @@ metric's:
    that never loads, or a behaviour that only appears under a real event loop all pass. The suite
    proves the shipped script boots against the shipped markup and wires its handlers to elements
    that exist — the class of defect that shipped in `0.6.0` — and it is **not** equivalent to a
-   browser test. A real headless browser remains the honest fix and remains the project's first
-   heavyweight dev dependency, which is still not a small thing to spend.
+   browser test.
+
+   **This is no longer a hypothetical, and the cost estimate was wrong.** `Unreleased` pointed a
+   real headless Chrome at the page for the first time and found the drawer painting over half the
+   workspace from boot — a defect that shipped in `0.6.0`, survived both suites written to catch
+   exactly this, and was visible in the first screenshot. jsdom resolves `hidden` ahead of the
+   cascade, so the smoke suite's `getAttribute("hidden")` reported a drawer opening and closing
+   correctly while a browser showed one that never shut. That is the difference between the two
+   tools, stated as a defect rather than as a caveat.
+
+   It also cost far less than "the project's first heavyweight dev dependency" assumed. No
+   dependency was added: Chrome was already on the machine, and ~140 lines of Python drove it over
+   the DevTools protocol — navigate, run a setup expression, read `getBoundingClientRect` and
+   `getComputedStyle`, capture a PNG. **The narrowed item is to make that a checked-in gate**, with
+   the browser discovered rather than downloaded and the suite skipping cleanly when there is none,
+   asserting the handful of geometric facts no other suite can reach: `[hidden]` elements measuring
+   0×0, the drawer sharing the row rather than overlapping `main`, nothing overlapping the top bar,
+   and the empty state landing in the workspace. A scratch script that found a shipped defect and
+   was then deleted is a gate the project had for one afternoon.
 
 8. **A cancelled run still finishes its pipeline.** `0.6.2` made a delete stop the *persistence* of
    a running analysis, which is the half that was corrupting state. The model calls already issued
@@ -1243,8 +1366,16 @@ metric's:
    key this environment does not have. Worth doing once, deliberately, next time a paid run happens
    anyway.
 
-10. **The delete confirmation focuses the destructive button.** `app.js` swaps the delete control for
-    a two-step confirm and moves focus to *"Delete for good"*, so a stray Enter after clicking
-    Delete destroys the analysis. Correct for a keyboard user reaching the confirm deliberately,
-    wrong as a default. Left alone in `0.6.2` because it is unrelated to the lifecycle bug and
-    changing focus behaviour without a test that renders the page is how `0.6.0` happened.
+10. ~~**The delete confirmation focuses the destructive button.**~~ **Closed by `Unreleased`.**
+    *Cancel* takes the focus and comes first in source order, so the tab order and the reading
+    order agree with it. The condition this item set for itself — "changing focus behaviour without
+    a test that renders the page is how `0.6.0` happened" — was met before the change: the page is
+    rendered by `browser-smoke.test.ts`, which clicks the real Delete button and asserts
+    `document.activeElement`, and the assertion was watched to fail against the old behaviour.
+
+11. **Nothing has re-measured since the benchmark gained headroom.** `0.7.0` built a dataset that
+    can disagree and then deliberately spent none of it; `Unreleased` changed only the product
+    layer, so there is still no measurement against the 38-question set except the unchanged
+    system's. Item 1 remains the one with evidence behind it, and it remains untouched — which is
+    the right order, and is also now two iterations of not doing the thing the instrument was
+    sharpened for.

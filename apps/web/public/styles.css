@@ -27,10 +27,39 @@
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --radius: 6px;
+  /*
+   * The evidence drawer's docked width. A ceiling and a floor around a fraction, so it
+   * is a margin note at 1440 and still legible at 1200, and never the 47% of the
+   * viewport a flat 680px took. Above the ceiling the workspace gets the difference.
+   */
+  --drawer-w: clamp(320px, 27vw, 400px);
 }
 
 * {
   box-sizing: border-box;
+}
+
+/*
+ * The attribute has to win.
+ *
+ * `[hidden] { display: none }` is a *user-agent* rule, and every author declaration
+ * outranks the whole user-agent origin no matter how weak its selector. So
+ * `.drawer { display: flex }` — three lines of layout for a panel that is supposed to
+ * open on demand — quietly defeated `<aside class="drawer" hidden>`, and the evidence
+ * drawer painted over the right-hand third of the workspace on every load, from boot,
+ * with nothing in it. `drawer.hidden = false` then had nothing to do and `closeDrawer`
+ * nothing to undo: the attribute was right the entire time and the element was on
+ * screen the entire time.
+ *
+ * Nothing in the test suite could see it. jsdom resolves `hidden` ahead of the cascade,
+ * so `getAttribute("hidden")` in the smoke suite reported an open-and-shut drawer while
+ * a browser showed one that never shut. `wiring.test.ts` gates this rule as text instead.
+ *
+ * `!important` because the next person to set `display` on a hideable element will not
+ * know any of the above, and should not have to.
+ */
+[hidden] {
+  display: none !important;
 }
 
 html,
@@ -70,11 +99,23 @@ pre,
 
 /* ---------------------------------------------------------------- top bar */
 
+/*
+ * One row that wraps in one place.
+ *
+ * The bar is `flex-wrap`, and with the brand, four form controls and the provider line
+ * all competing on equal terms it used to break up in whatever order the widths fell —
+ * a scout-focus input alone on the second line at 1280, the provider stranded on a third
+ * at 1100. So the form is one wrapping unit (`.analyse` wraps internally, the bar's
+ * children do not fight it), the two fixed selects hold their size, and the focus field
+ * is the only thing that gives. The provider is pushed to the far end with `margin-left:
+ * auto` rather than left to float there, and drops below the form as a unit when it
+ * cannot fit.
+ */
 .topbar {
   display: flex;
   align-items: flex-end;
-  gap: 20px;
-  padding: 12px 20px;
+  gap: 14px 18px;
+  padding: 10px 20px;
   background: var(--bg-raised);
   border-bottom: 1px solid var(--line);
   flex: 0 0 auto;
@@ -95,20 +136,22 @@ pre,
 
 .analyse {
   display: flex;
-  gap: 10px;
+  gap: 8px 10px;
   align-items: flex-end;
-  flex: 1 1 520px;
+  flex-wrap: wrap;
+  flex: 1 1 560px;
+  min-width: 0;
 }
 
 .field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
   min-width: 0;
 }
 
 .field.grow {
-  flex: 1 1 auto;
+  flex: 1 1 220px;
 }
 
 .field > span {
@@ -191,26 +234,38 @@ button.ghost.on {
   color: var(--ink-faint);
   padding-bottom: 6px;
   white-space: nowrap;
+  margin-left: auto;
 }
 
 /* ---------------------------------------------------------------- layout */
 
+/*
+ * Three regions in one row: sections, workspace, and — only while a citation is open —
+ * the evidence drawer.
+ *
+ * `position: relative` is load-bearing rather than decorative. Below the docking width
+ * the drawer overlays instead of docking, and this is what it overlays: the row, not the
+ * viewport. A panel positioned against the viewport starts at `top: 0` and covers the
+ * toolbar, which is exactly what it used to do; positioned against this box it cannot
+ * reach above the top bar however tall the top bar becomes.
+ */
 .layout {
   display: flex;
   flex: 1 1 auto;
   min-height: 0;
+  position: relative;
 }
 
 .sidebar {
-  width: 208px;
+  width: 216px;
   flex: 0 0 auto;
   border-right: 1px solid var(--line);
   background: var(--bg-raised);
-  padding: 14px 0;
+  padding: 12px 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 14px;
 }
 
 .nav {
@@ -275,9 +330,16 @@ button.ghost.on {
  * control, because an analysis now outlives the process that made it — the list is how
  * you find one again, so it has to say enough to choose by.
  *
+ * Enough, and no more. Every row printing all of that at once turned a 216px column into
+ * a wall of 9px type with no shape to scan, so the longest line is earned rather than
+ * given: the summary appears on the row you have open, on one that is running, and on one
+ * that failed — the three cases where the sentence is the reason you are looking — and is
+ * clamped to three lines when it does. Nothing is revealed on hover, here or anywhere
+ * else in this file: a control a keyboard user cannot see until they have already focused
+ * it is a control they cannot find, and the delete button stays where it was.
+ *
  * The border lives on the `<li>` rather than the button so the delete control sits inside
- * the same frame. Nothing here is revealed on hover: a control a keyboard user cannot see
- * until they have already focused it is a control they cannot find.
+ * the same frame.
  */
 .analysis-row {
   display: flex;
@@ -299,7 +361,7 @@ button.ghost.on {
 .analysis-open {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
   width: 100%;
   text-align: left;
   background: none;
@@ -345,6 +407,12 @@ button.ghost.on {
   font-size: 10px;
   line-height: 1.45;
   color: var(--ink-faint);
+  /* Three lines of a summary is a hint; ten is the report, and the report is elsewhere. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
 }
 
 .analysis-summary.bad {
@@ -371,6 +439,7 @@ button.ghost.on {
 
 .analysis-delete,
 .analysis-confirm,
+.analysis-cancel,
 .analysis-confirm-group .ghost {
   font-size: 10px;
   padding: 2px 7px;
@@ -391,17 +460,50 @@ main {
   min-width: 0;
 }
 
+/*
+ * The empty state. One of them, for every section that can be empty.
+ *
+ * There were two before and there was room for nine: a `.empty` block in `index.html`
+ * for the un-booted shell and another built in `render()`, both saying "Show me where
+ * you found it" whichever section you had asked for — so `#architecture` with no
+ * analysis open was a landing page wearing an architecture URL. The copy is now per
+ * section and lives in `app.js`; this is the only shape it can take, and
+ * `wiring.test.ts` counts the class to keep it that way.
+ *
+ * Left-aligned and near the top rather than centred at `12vh`, because it occupies the
+ * workspace and the workspace is a tool: the reader's eye starts where the heading of a
+ * real section would start, and the button that fills it is the first thing under the
+ * text rather than a paragraph away.
+ */
 .empty {
-  max-width: 520px;
-  margin: 12vh auto;
-  text-align: center;
+  max-width: 46ch;
+  margin: 6vh 0 0;
   color: var(--ink-dim);
 }
 
 .empty h1 {
-  font-size: 22px;
+  font-size: 20px;
   color: var(--ink);
-  margin-bottom: 10px;
+  margin-bottom: 8px;
+}
+
+.empty p {
+  margin: 0 0 14px;
+  line-height: 1.6;
+}
+
+.empty-eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 0 0 6px;
+}
+
+.empty-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 /* ----------------------------------------------------------------- pills */
@@ -726,6 +828,20 @@ ul.plain li:last-child {
   color: #fff;
 }
 
+/*
+ * The citation whose artefact is open in the drawer.
+ *
+ * `aria-expanded` is the selector rather than a class, so there is one fact and not two:
+ * the chip a screen reader calls expanded is the chip the eye finds filled in. Without
+ * it the drawer is a panel that appeared from somewhere, and a second click on the chip
+ * that opened it — which closes it — has nothing to close, as far as the reader can see.
+ */
+.chip[aria-expanded="true"] {
+  background: #a371f7;
+  border-color: #a371f7;
+  color: #14101c;
+}
+
 .unsupported {
   font-family: var(--mono);
   font-size: 10px;
@@ -953,18 +1069,43 @@ ul.plain li:last-child {
 
 /* ---------------------------------------------------------------- drawer */
 
+/*
+ * A contextual inspection surface, not a second workspace.
+ *
+ * It was `position: fixed; top: 0; right: 0; bottom: 0; width: min(680px, 92vw)` — 47%
+ * of a 1440px screen, 53% of a 1280px one, taken out of the viewport from the top edge
+ * down, so it covered the top bar as well as the report. Combined with the `[hidden]`
+ * defeat above, that is the whole of the screenshot: a permanent empty panel over half
+ * the page, a toolbar with nowhere to go, and a workspace clipped underneath.
+ *
+ * Two changes. It is a **sibling of `main` inside `.layout`** now, so where it docks it
+ * takes its width from the row and the workspace reflows into what is left — the report
+ * re-wraps, the diagram re-fits, and nothing is hidden under a floating panel. And it is
+ * a **third of the row at most**, because a citation is a footnote to the thing you are
+ * reading and must not become the thing you are reading.
+ *
+ * Below the docking width there is no room to divide, so it overlays instead — against
+ * `.layout`, which is why it still cannot reach the top bar. It is not modal in either
+ * form: no scrim, no focus trap, no `aria-modal`. The page behind stays operable, which
+ * is what makes an inspection surface an inspection surface, and is why Escape and a
+ * labelled close button are the whole of the contract.
+ *
+ * Note there is no `display` here. `.drawer` is opened and closed with the `hidden`
+ * attribute, and a `display` in this block is precisely what stopped that working; the
+ * flex column it needs when open is set under `:not([hidden])` so the attribute keeps
+ * the last word.
+ */
 .drawer {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: min(680px, 92vw);
+  flex: 0 0 var(--drawer-w);
+  min-width: 0;
+  min-height: 0;
   background: var(--bg-raised);
   border-left: 1px solid var(--line-strong);
-  box-shadow: -18px 0 46px #0008;
+}
+
+.drawer:not([hidden]) {
   display: flex;
   flex-direction: column;
-  z-index: 20;
 }
 
 .drawer > header {
@@ -972,11 +1113,13 @@ ul.plain li:last-child {
   justify-content: space-between;
   align-items: flex-start;
   gap: 12px;
-  padding: 14px 16px;
+  padding: 12px 14px;
   border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
 }
 
 .drawer-eyebrow {
+  display: block;
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -990,8 +1133,31 @@ ul.plain li:last-child {
 }
 
 .drawer-body {
-  padding: 14px 16px 40px;
+  padding: 12px 14px 40px;
   overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/*
+ * The narrow form: over the workspace rather than beside it.
+ *
+ * Below this width a docked column and the workspace it leaves behind are both too
+ * narrow to read, so one of them gives. `.layout` is the containing block — `absolute`,
+ * not `fixed` — so the top bar and the section list stay reachable and the overlay is
+ * bounded by the row it belongs to.
+ */
+@media (max-width: 1179px) {
+  .drawer:not([hidden]) {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(420px, 100%);
+    flex: none;
+    box-shadow: -18px 0 46px #0008;
+    z-index: 20;
+  }
 }
 
 .kv {
