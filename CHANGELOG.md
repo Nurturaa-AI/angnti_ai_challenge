@@ -113,6 +113,52 @@ layout claim above is quoted from it. That it was a scratch file is the honest l
 was found the first time a browser looked at the page. See item 7 of `## Next`, now narrowed to
 one concrete thing.
 
+### Measured — Iteration 7's synthesis experiment, and rejected it
+
+Iteration 6 ended with a hypothesis rather than a change: source-backed accuracy is limited by claim
+**granularity**, not retrieval, because in 16 of 17 failures the expected evidence was already in
+context. Iteration 7 spent that lever. One variable moved — six form-level instructions appended to
+`buildSynthesisPrompt`, asking the model to keep a fact and its identifier in the same sentence
+instead of splitting them across claims. Model, seed, thinking level, tools, budgets, scout,
+grounding, schema, evaluator, benchmark and fixtures were all held.
+
+**The acceptance threshold was +8 pp on Challenge evidence-backed accuracy. The result was −4.2 pp.**
+
+| | Control | Treatment |
+| --- | --- | --- |
+| Run id | `eval-advanced-2026-09-05T01-35-25Z` | `eval-advanced-2026-09-05T17-58-05Z` |
+| Provenance | `iteration-6-baseline` | `iteration-7-synthesis-experiment` |
+| Challenge evidence-backed | 29.2 % (7/24) | **25.0 % (6/24)** |
+| Challenge answer accuracy | 41.7 % (10/24) | 41.7 % (10/24) |
+| Regression (frozen, 14) | 100.0 % / 100.0 % | 100.0 % / 100.0 % |
+| Combined evidence-backed | 55.3 % (21/38) | 52.6 % (20/38) |
+| Fabrications / dropped citations | 0 / 0 | 0 / 0 |
+| Briefing unsupported claims | 0 | 0 |
+| Mean evidence relevance | 0.4007 | 0.3730 |
+| Runtime / cost | 1m41s / $0.066076 | 1m29s / $0.069218 |
+
+**Exactly one question of 38 changed outcome.** `challenge-v2-orders-q03` went PASS → UNCITED: an
+instruction written to consolidate a fact with its identifier produced dispersal on the one case
+already getting it right. Nothing was recovered. Of four groupings only `cross-file-reasoning` moved
+(2/3 → 1/3) — the category the treatment targeted, moving down.
+
+**The mechanism fired and the hypothesis was still wrong.** `pyflow-q04` recovered the literal
+`insert` the control dropped, and still failed: it also needs one of `append` / `history` /
+`every run` / `new row` / `accumulat`. Getting a literal into a sentence is not the same as having
+established what the code does with it. "The evidence was in context" is a much weaker claim than
+"the model had established the fact", and synthesis here is question-blind by design — the model
+writes one briefing and the scorer later asks nineteen questions of it. Three failures are out of
+reach of any prompt: `selectClaims` emits one claim per dependency entry, so a question needing two
+dependency names in one claim cannot be satisfied by better writing.
+
+**Rejected, and nothing experimental was left behind.** `advanced/src/prompt.ts` is byte-identical
+to its pre-experiment state, `ADVANCED_VERSION` stays at 0.1.0 because no behaviour shipped, and no
+second prompt change was stacked into the same iteration. What is kept is the measurement, the
+Iteration 6 baseline it was compared against (not overwritten), and six tests in
+`advanced/test/advanced.test.ts` retargeted at the control prompt — including the gate that the
+synthesis prompt names no benchmark answer, fixture path, case id or evaluator category label.
+`pnpm verify:measured --ref HEAD` reports `OK` with all nine frozen files unchanged.
+
 ## [0.7.0] — 2026-09-05
 
 **The benchmark had stopped being able to disagree.**
@@ -1255,26 +1301,33 @@ nothing in this release claims the results are good.
 
 ## Next
 
-Iteration 6 closed items 1 and 3 — the two that had been marked blocking — and closed the cheap
-half of item 7. It closed them without spending the headroom it created: the benchmark now
-discriminates, and the first change measured against it has deliberately not been made yet.
+Iteration 6 closed items 1 and 3 and left item 1 below as the change with evidence behind it.
+**Iteration 7 made that change, measured it, and rejected it** — which closes the item as a
+question rather than as a success, and rewrites what comes next.
 
-1. **Test the synthesis-granularity hypothesis. This is the one with evidence behind it.**
-   Source-backed questions score 33.3 % where documentation-backed ones score 93.3 %, and in **16
-   of 17 failures the expected evidence was already in the model's context, un-truncated** — so
-   this is not retrieval, not grounding, and not fabrication (there were none). The mechanism is
-   that a component claim is one sentence about a module's role, which has no room for the literal
-   the question asks for; a further three failures answered correctly *across separate claims*,
-   which the scorer does not credit. The full hypothesis, mechanism, expected metric movement and
-   risk are in [`docs/improvement-changelog.md`](docs/improvement-changelog.md).
+1. ~~**Test the synthesis-granularity hypothesis.**~~ **Done, and rejected.** Challenge
+   evidence-backed accuracy went 29.2 % → 25.0 % against a +8 pp threshold; exactly one question of
+   38 changed outcome and it changed PASS → UNCITED; fabrications stayed at 0, so the stated risk
+   was not what went wrong. The prompt is reverted. What the negative result teaches is that
+   "the expected evidence was in context" is a much weaker claim than "the model had established
+   the fact", and that a **question-blind** synthesis step cannot be instructed to organise itself
+   around a question it never sees.
 
-   Two things make this actionable in a way nothing on this list has been for three iterations.
-   The benchmark now has 24 questions of headroom, so a change can be *rejected* on the evidence
-   rather than tying at 100 %. And the change is one variable: it does not touch the scout, the
-   ranking, the tools or the grounding layer. Its risk is equally specific — inviting a model to
-   include more concrete values is exactly how fabrications start, and the current count is zero
-   across every run ever made. Any attempt must report the fabrication count first and the accuracy
-   second.
+   The successor is therefore not another prompt edit, and Iteration 7's own constraints forbid
+   stacking one. Two directions remain, and they are architectural rather than lexical:
+
+   - **Give claims somewhere to put a literal.** Three of the 17 failures are unreachable by any
+     prompt because `selectClaims` emits one claim per dependency entry, so a question needing two
+     dependency names in a single claim cannot be answered by better writing. That is a schema and
+     claim-selection question, and changing either changes what the evaluator consumes — so it needs
+     its own iteration and its own frozen-baseline argument.
+   - **Or accept that the briefing is not question-shaped, and measure the thing that is.** The
+     product already has grounded Q&A downstream of the briefing. Whether *that* path answers the
+     Challenge questions is a different measurement from whether the briefing happens to contain
+     them, and it has never been run.
+
+   Whichever is chosen: hypothesis first, one variable, and the Iteration 6 baseline stays where it
+   is.
 2. **Decide what mean evidence relevance is for, and then fix corroboration to respect it.** It has
    moved the wrong way twice while the primary metric moved the right way, the second time by a
    third of its value: the precision pass adds two corroborations per claim unconditionally up to

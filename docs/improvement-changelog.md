@@ -1452,3 +1452,212 @@ $0.066076 for the benchmark run, plus $0.033038 for the two diagnostic runs that
 16/17 split — $0.099114 in total. The mock validation pass that preceded them cost nothing and is
 not a quality measurement of anything; it exists to prove the pipeline scores 38 questions end to
 end before any paid call is made.
+
+---
+
+## Iteration 7 — Synthesis Granularity
+
+*Hypothesis recorded before any code was written. The measurement follows below it, whichever way it
+went.*
+
+### Hypothesis
+
+**Observation.** Iteration 6 measured the unchanged system against the 38-question benchmark and
+found 100.0 % evidence-backed on the frozen Regression Set v1 against 29.2 % on Challenge Set v2.
+The gap tracks evidence kind: 80.0 % evidence-backed on documentation-backed questions against
+26.7 % on source-backed ones.
+
+**Failure pattern.** In 16 of 17 failures the expected evidence was already in the model's context,
+un-truncated, with `budgetExhausted: false`. Fabrications, dropped citations and unsupported
+briefing claims were all zero. The system is not inventing, not mis-citing, and — in all but one
+case — not failing to retrieve.
+
+**Hypothesis.** The synthesis turn compresses source it has read into role-level descriptions and
+discards the specifics. Accuracy on source-backed questions is limited by the *granularity* of the
+claims synthesis writes, not by retrieval coverage or by grounding.
+
+**Mechanism, in three parts — which is the part of this entry most likely to be wrong.** Reading
+each of the 17 failures against its case definition and its fixture, they are not one failure mode:
+
+1. **Literal loss — 11 failures.** A component claim is one sentence about what a module does, and a
+   literal has no place in that sentence. `fixtures/orders-api/src/config.js` line 9 reads
+   `port: Number(env.PORT ?? 4000)`; the briefing says *"listens on the configured port"*. The pool
+   line carries `max: 10`; the briefing omits it. Same shape for `mypy`, `insert`, `failed`,
+   `database_url`, `kafka_brokers`. The file was in context and the token was not in the answer.
+2. **Cross-claim dispersal — 3 failures** (`orders-q05`, `orders-q11`, `pyflow-q12`). The answer was
+   correct and every keyword was present, but spread across *separate* claims. `scoreQuestion`
+   credits evidence only from claims that *themselves* satisfy the requirement, so `matchingClaims`
+   is empty and the question scores `UNCITED` — correct, uncredited.
+3. **Genuine retrieval miss — 1 failure.** Untouched by this iteration by construction: no
+   retrieval surface is being changed.
+
+**Where the mechanism is weakest, stated now rather than after the numbers.** One of those three
+cross-claim failures is not reachable by a prompt at all. `pyflow-q12` requires `click` *and* one of
+`rich`/`sqlalchemy`/`pyyaml` inside a single claim, and `selectClaims` emits one claim per
+dependency entry — so no dependency claim can ever contain two dependency names. Fixing that means
+changing the answer schema or the scorer, both forbidden this iteration and both correctly so. The
+honest ceiling for a prompt-only treatment is therefore **16 of 17**, not 17, and probably lower:
+`orders-q11` is nearly the same shape.
+
+**Expected metric movement.** Challenge evidence-backed accuracy rises from 29.2 %; the movement
+concentrates in source-backed questions (26.7 %, 15 questions) and documentation-backed accuracy
+(80.0 %) stays flat. Regression Set v1 stays at 100.0 %. Fabrications stay at 0.
+
+**Falsification.** The hypothesis is wrong if the literals stay absent from the briefings while the
+prompt demonstrably asked for them — that would mean granularity is not the model's constraint and
+the bottleneck is somewhere this iteration did not look. It is also wrong, differently, if accuracy
+rises while unsupported claims or fabrications rise with it: that is a model answering from memory,
+not from evidence, and it fails the acceptance criteria regardless of the primary metric.
+
+**Risk.** Three, in descending order of how much they would cost. Inviting specificity is exactly
+how fabrications start, and the count has been 0 across every run ever made — that is the thing most
+worth not losing. A claim stuffed with literals is a worse briefing for a human reader, and this
+system's output is meant to be read. And more, longer claims mean more output tokens, so cost rises
+whether or not accuracy does.
+
+### The change
+
+One function, `buildSynthesisPrompt` in `advanced/src/prompt.ts`: `+37 −1` lines, all of them a new
+`HOW TO WRITE A CLAIM` block appended after the existing task paragraph. Six instructions, each
+about the *form* of a claim rather than about any subject — write the value in the exact form the
+file spells it rather than the fact that a value exists; say what a mechanism does concretely; write
+a fact resting on two files as one claim citing each; keep the facts answering one question inside
+one claim; be specific and brief in the same claim; and rest every substantive claim on something
+actually read rather than on how a framework usually behaves.
+
+Nothing else. `verify:measured --ref HEAD` reports `advanced/src/prompt.ts: M +37 -1` and every
+frozen file unchanged — evaluator, both frozen cases, the fixture builder. The reconnaissance prompt,
+the system instruction, the scout, the tools, the ledger, grounding, precision, the schema, the
+benchmark, the fixtures, the model, the seed and the thinking level are all untouched, and a test
+asserts the first two of those by inspection rather than by promise.
+
+Eleven prompt-construction tests were added. Six were watched to fail against the control prompt
+before the treatment was kept; the other five assert that the treatment displaced nothing — the
+closed citable set, the two conditional branches, no secret or trajectory in the prompt, and the
+one-variable scope. Four of them are the anti-overfitting gate: the prompt is asserted *not* to
+contain `4000`, `database_url`, `kafka_brokers`, `jwt_secret`, `mypy`, `max: 10`, any fixture path,
+any of the eleven evaluator category names, or the words `benchmark`, `evaluator`, `scorer`,
+`challenge` or `regression`.
+
+### Measurement
+
+Same model, same seed, same thinking level, same 38 questions, same evaluator as the control.
+
+| | |
+|---|---|
+| Run id | `eval-advanced-2026-09-05T17-58-05Z` |
+| Command | `pnpm evaluate:advanced -- --model gemini-3.5-flash-lite --provenance iteration-7-synthesis-experiment --case-delay 5` |
+| Model | `gemini-3.5-flash-lite`, seed 7, thinking `low` |
+| Provenance | `iteration-7-synthesis-experiment` |
+| Benchmark | `repo-archaeologist v2` — 38/38 questions scored |
+
+| Metric | Iteration 6 control | Iteration 7 treatment | Delta |
+|---|---:|---:|---:|
+| Regression answer accuracy | 100.0 % (14/14) | 100.0 % (14/14) | — |
+| **Regression evidence-backed** | **100.0 % (14/14)** | **100.0 % (14/14)** | **—** |
+| Challenge answer accuracy | 41.7 % (10/24) | 41.7 % (10/24) | — |
+| **Challenge evidence-backed** | **29.2 % (7/24)** | **25.0 % (6/24)** | **−4.2 pp** |
+| Combined answer accuracy | 63.2 % (24/38) | 63.2 % (24/38) | — |
+| **Combined evidence-backed** | **55.3 % (21/38)** | **52.6 % (20/38)** | **−2.7 pp** |
+| Mean evidence relevance | 0.4007 | 0.3730 | −0.0277 |
+| Unsupported answers | 3 | 4 | +1 |
+| Fabrications | 0 | 0 | — |
+| Briefing unsupported claims | 0 | 0 | — |
+| Dropped citations | 0 | 0 | — |
+| Runtime | 1 m 41 s | 1 m 29 s | −12 s |
+| Tokens (in / out) | 113 590 / 12 800 | 115 294 / 13 852 | +1.5 % / +8.2 % |
+| Cost | $0.066076 | $0.069218 | +4.8 % |
+
+**The treatment failed.** Challenge evidence-backed accuracy moved 4.2 points the wrong way, against
+an acceptance threshold of +8. Answer accuracy did not move at all — the same 24 of 38 questions
+were answered correctly before and after.
+
+**Per-question, exactly one outcome changed in 38.** `challenge-v2-orders-q03` went `PASS` →
+`UNCITED`: the answer stayed correct, and the facts that had been inside one `components` claim were
+dispersed across claims, so no single claim satisfied the question and the evidence could not be
+credited. The instruction most directly aimed at that failure mode — *keep the facts that answer one
+question inside one claim* — is the one whose only measurable effect was to break the case that was
+already getting it right.
+
+**By category, one group moved and it is the diagnostic one.** Every category is flat except
+`cross-file-reasoning`, 2/3 → 1/3. Source-backed evidence fell 4/15 → 3/15; documentation (12/15) and
+mixed (5/8) are unchanged; every difficulty band is flat except `hard`, 4/12 → 3/12. The single
+category that moved is the one the "write it as one claim and cite each file" instruction targeted,
+and it moved down.
+
+### Why the hypothesis was not sufficient
+
+**The mechanism was half right, and the half that was right did not matter.** The treatment *did*
+change literal preservation: `insert` reached the briefing for `pyflow-q04`, where the control had
+omitted it. Questions with missing keywords fell from 5 to 4. So the model can be instructed to keep
+a literal, and it did.
+
+`pyflow-q04` still fails. It needs `insert` *and* one of `append` / `history` / `every run` /
+`new row` / `accumulat` — a claim that the store *appends* rather than overwrites. The literal
+arrived; the reasoning about what the literal implies did not. That is the finding: the missing
+tokens Iteration 6 catalogued were a *symptom* of shallow claims, not the cause of the failures, and
+instructing the symptom away leaves the failure in place.
+
+**Iteration 6's own diagnostic pointed here and was over-read.** The count was "the expected evidence
+was in context in 16 of 17 failures", and the inference drawn was that the model therefore had
+everything it needed and was merely compressing. But "the bytes were in the context window" is a
+much weaker claim than "the model had established the fact". `pyflow-q04` needs someone to notice
+that an `INSERT` with no `ON CONFLICT` and no `DELETE` means history accumulates. The evidence being
+present is necessary for that and nowhere near sufficient.
+
+**And one instruction was actively counterproductive.** Telling a model to consolidate the facts
+answering a question into one claim presumes it knows which question it is answering. Synthesis is
+question-blind by design — it writes a briefing, not answers — so "one claim per question" has no
+referent at synthesis time. What the model can do with that instruction is reorganise claims on a
+guess, which is what `orders-q03` shows it doing: an instruction to consolidate produced dispersal,
+because the consolidation was aimed at a question the model could not see. The three pre-existing
+cross-claim failures did not move, and a fourth joined them.
+
+**The one thing the entry got right in advance.** The hypothesis recorded before the run predicted a
+prompt-only ceiling below 16/17 and named `pyflow-q12` as structurally unreachable — one claim per
+dependency entry, so no dependency claim can hold two dependency names. All four cross-claim
+failures are still cross-claim failures, and that reading is unchanged by the result.
+
+### Grounding integrity
+
+The safety properties held completely: **0 fabrications, 0 dropped citations, 0 unsupported briefing
+claims**, exactly as in the control. The Requirement G counterweight worked — a prompt that pushed
+hard for concrete values did not produce a single invented one. Unsupported *answers* rose 3 → 4, but
+that is the `orders-q03` dispersal being counted, not a grounding failure: the citations were real and
+verified, they just no longer hung off a claim that answered the question.
+
+Mean evidence relevance fell 0.4007 → 0.3730. Given the standing open question about what that metric
+measures — item 2 on the `Next` list, where corroboration unconditionally dilutes a claim that cited
+exactly the right source — this is not independently interpretable and no weight is placed on it.
+
+### Decision
+
+**Rejected.** The treatment is reverted; `advanced/src/prompt.ts` returns to the control prompt and
+`ADVANCED_VERSION` stays at 0.1.0, because no analysis behaviour ships from this iteration.
+
+Every acceptance criterion that could fail, failed: the primary metric declined 4.2 points against a
++8 threshold, answer accuracy was flat, and the one category that moved moved down. Regression held
+at 100 % and fabrications held at 0, which is what keeps this a clean negative rather than a harmful
+one. Per the iteration rule, no second prompt change was stacked on top to chase a positive number —
+that would have converted a controlled experiment into an untracked search.
+
+The prompt-construction tests are **kept**, retargeted at the control prompt. They assert the
+properties the control already has — the closed citable set, both conditional branches, no secret or
+trajectory in the prompt, and that the synthesis instruction names no benchmark answer, fixture path
+or evaluator category. Six of the eleven were treatment-specific and are removed with it. The
+anti-overfitting gate is worth more than the experiment that motivated it: it will fail on the next
+iteration that tries to score better by naming an answer.
+
+**Lesson.** "The evidence was in the context window" and "the model had established the fact" are
+different claims, and Iteration 6 measured the first while its hypothesis assumed the second. A
+retrieval diagnostic can rule retrieval *out* without thereby ruling synthesis prompting *in*. The
+sharpest single result is `pyflow-q04`: the treatment moved the exact literal the hypothesis named
+into the briefing, and the question still failed — a mechanism can be confirmed at the token level
+and still be the wrong explanation for the failure.
+
+Also worth carrying: a question-blind synthesis step cannot be instructed to organise itself around
+a question. That instruction had no referent and its only measured effect was to break a passing case.
+
+**Cost of the negative result.** $0.069218 for the treatment run. Two runs of the 38-question
+benchmark now exist at a combined $0.135294, and the second one bought a rejected hypothesis and a
+sharper reading of the first — which is what the benchmark headroom was built for.

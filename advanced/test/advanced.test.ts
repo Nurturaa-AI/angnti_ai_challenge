@@ -18,8 +18,11 @@ import { scoreCase } from "@repo-arch/evaluator";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   ADVANCED_RESPONSE_SCHEMA,
+  ADVANCED_SYSTEM_INSTRUCTION,
   ADVANCED_SYSTEM_NAME,
+  buildReconnaissancePrompt,
   buildRunId,
+  buildSynthesisPrompt,
   runAdvanced,
   type AdvancedPhase,
 } from "../src/index";
@@ -961,5 +964,125 @@ describe("runAdvanced — phase reporting is an observation, not a participant",
 
     expect(seen.every((args) => Array.isArray(args) && args.length === 1)).toBe(true);
     expect(seen.every((args) => typeof (args as unknown[])[0] === "string")).toBe(true);
+  });
+});
+
+/**
+ * What the synthesis instruction must contain, and what it must never contain.
+ *
+ * These outlived Iteration 7's rejected treatment deliberately. The experiment they
+ * were written for failed — a `HOW TO WRITE A CLAIM` block that measured 4.2 points
+ * *worse* on challenge evidence-backed accuracy and was reverted — but the properties
+ * asserted here belong to the control prompt and are worth a gate regardless of which
+ * prompt is in place.
+ *
+ * The negative half is the load-bearing half. Any future iteration that improves the
+ * score by naming an expected answer, a fixture path or an evaluator category label
+ * has overfitted the benchmark rather than improved the system, and that is the kind
+ * of change that looks like progress in a report. It fails here instead.
+ */
+describe("the synthesis instruction", () => {
+  const synthesis = (overrides: Partial<Parameters<typeof buildSynthesisPrompt>[0]> = {}): string =>
+    buildSynthesisPrompt({
+      citableIds: ["tree", "README.md", "package.json", "metadata", "src/dispatch.js"],
+      filesRead: ["src/dispatch.js"],
+      budgetExhausted: false,
+      ...overrides,
+    });
+
+  it("closes the citable set and explains what a read proves", () => {
+    const prompt = synthesis();
+
+    expect(prompt).toContain("You may cite exactly these 5 source ids, and no others:");
+    for (const id of ["tree", "README.md", "package.json", "metadata", "src/dispatch.js"]) {
+      expect(prompt).toContain(`  - ${id}`);
+    }
+    expect(prompt).toMatch(/1 file\(s\) were read in full or in part/);
+    expect(prompt).toMatch(/verified against exactly the regions those calls returned/);
+    expect(prompt).toMatch(/Produce the briefing as JSON matching the provided schema/);
+  });
+
+  it("keeps the no-files and budget-exhausted branches intact", () => {
+    const noFiles = synthesis({ filesRead: [] });
+    expect(noFiles).toMatch(/No files were read/);
+    expect(noFiles).toMatch(/must therefore be marked as inference/);
+
+    const exhausted = synthesis({ budgetExhausted: true });
+    expect(exhausted).toMatch(/exploration budget ran out/);
+    expect(exhausted).toMatch(/keep confidence low/);
+  });
+
+  it("names no benchmark answer, fixture path, case id or evaluator label", () => {
+    const prompt = synthesis().toLowerCase();
+
+    // Every literal below is one this benchmark's failures turn on. Synthesis must
+    // improve without having been told any of them.
+    for (const answer of ["4000", "database_url", "kafka_brokers", "jwt_secret", "mypy", "max: 10"]) {
+      expect(prompt).not.toContain(answer.toLowerCase());
+    }
+    for (const fixturePath of ["src/config.js", "src/lib/db.js", "pyflow/store.py", "pyproject.toml"]) {
+      expect(prompt).not.toContain(fixturePath.toLowerCase());
+    }
+    for (const label of ["challenge", "regression", "benchmark", "evaluator", "expected keyword", "scorer"]) {
+      expect(prompt).not.toContain(label);
+    }
+    // Evaluator category names: how the *report* groups failures. A model that saw
+    // them would be answering a category rather than reading a repository.
+    for (const category of [
+      "direct-fact",
+      "cross-file-reasoning",
+      "indirect-evidence",
+      "keyword-mismatch",
+      "architecture-inference",
+      "behavioral-flow",
+      "configuration-dependency",
+      "negative-absence",
+      "competing-evidence",
+      "evidence-precision",
+      "multi-language",
+    ]) {
+      expect(prompt).not.toContain(category);
+    }
+  });
+
+  it("carries no secret, no trajectory and no tool output", () => {
+    const prompt = synthesis();
+
+    expect(prompt).not.toMatch(/api[_-]?key/i);
+    expect(prompt).not.toMatch(/AIza/);
+    expect(prompt).not.toMatch(/GEMINI/);
+    // Tool output reaches the model as replayed conversation steps. A prompt that
+    // inlined them would be a second channel for evidence grounding never saw.
+    expect(prompt).not.toMatch(/toolResult|"kind":|trajectory/i);
+  });
+
+  it("is the prompt the run actually sends on the synthesis turn", () => {
+    const client = new ScriptedClient([{ text: "Nothing further." }], body());
+
+    return run(client).then(() => {
+      const final = client.requests.at(-1);
+      expect(final?.tools).toEqual([]);
+      expect(final?.schema).toBeDefined();
+
+      const lastUserStep = [...(final?.steps ?? [])].reverse().find((step) => step.kind === "user");
+      expect(lastUserStep?.kind).toBe("user");
+      expect((lastUserStep as { text: string }).text).toContain("## Produce the briefing");
+    });
+  });
+
+  it("leaves the reconnaissance prompt and the system instruction distinct from it", () => {
+    // The one-variable rule as an executable claim: three prompt surfaces, and a
+    // change to one of them should not silently reach the others.
+    expect(ADVANCED_SYSTEM_INSTRUCTION).toMatch(/^You are a senior engineer writing an onboarding briefing/);
+    expect(ADVANCED_SYSTEM_INSTRUCTION).not.toMatch(/## Produce the briefing/);
+
+    const recon = buildReconnaissancePrompt({
+      repositoryName: "demo",
+      sources: [],
+      budget: defaultBudget,
+      scoutEvidence: "",
+    });
+    expect(recon).toMatch(/## Your exploration budget/);
+    expect(recon).not.toMatch(/## Produce the briefing/);
   });
 });

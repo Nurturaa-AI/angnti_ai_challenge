@@ -443,6 +443,27 @@ whose normalized results are identical to Iteration 4's question by question, sc
 citation by citation. Neither system's version was bumped, because `systemVersion` names
 behaviour and the behaviour is provably the same.
 
+**Iteration 6 measured the unchanged system against a bigger benchmark and changed no analysis
+code.** It expanded the dataset from 14 questions to 38 — Regression Set v1 frozen, Challenge Set v2
+added — and reported 100.0 % on the frozen subset (identical to Iteration 3 to four decimal places)
+against 29.2 % on the new questions. Two diagnostic runs then established the finding that set up
+Iteration 7: in 16 of 17 failures the expected evidence was already in the model's context,
+un-truncated, with zero fabrications.
+
+**Iteration 7 tested the hypothesis that finding produced, and rejected it.** The lever was the
+synthesis prompt and nothing else: six form-level instructions asking the model to keep a fact and
+its identifier in one sentence rather than splitting them across claims. Challenge evidence-backed
+accuracy went 29.2 % → **25.0 %** against a +8 pp acceptance threshold; exactly one question of 38
+changed outcome, and it changed PASS → UNCITED. The prompt was reverted, `ADVANCED_VERSION` stayed
+at 0.1.0, and no second change was stacked on top.
+
+The architectural reason it could not work is [above](#two-phases-because-one-turn-cannot-do-both-jobs):
+synthesis is **question-blind by design**. The model writes one briefing; the scorer later asks
+nineteen questions of it. A prompt cannot instruct a writer to organise a paragraph around a
+question that is not in the prompt — and the alternative, passing evaluation questions into
+synthesis, would measure a different system. Iteration 6's "the evidence was in context" turns out
+to be a much weaker claim than "the model had established the fact".
+
 Full numbers, the regressions, and the reason mean evidence relevance moved the wrong way twice
 are in [`improvement-changelog.md`](improvement-changelog.md).
 
