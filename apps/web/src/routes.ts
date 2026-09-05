@@ -79,6 +79,15 @@ export interface ApiDependencies {
   events?: AnalysisEventBus | undefined;
   /** Bounds a question's own exploration. Separate from the analysis budget. */
   questionBudget?: ExplorationBudget | undefined;
+  /**
+   * Where runs served by this API originated. Defaults to
+   * `REPO_ARCHAEOLOGIST_PROVENANCE`, then to `unlabelled`.
+   *
+   * Recorded on every analysis and published on the detail view, so that a report
+   * read months later still says where it came from. Validated in the runner's
+   * constructor, which is what stops a mistyped value from becoming a stored row.
+   */
+  provenance?: string | undefined;
   now?: (() => Date) | undefined;
   /** Where an unexpected failure is reported in full. Defaults to stderr. */
   logError?: ((message: string) => void) | undefined;
@@ -147,6 +156,7 @@ export function createApi(dependencies: ApiDependencies): WebApi {
     client,
     budget: dependencies.budget,
     precisionPolicy: dependencies.precisionPolicy,
+    provenance: dependencies.provenance,
     now: dependencies.now,
     logError: dependencies.logError,
   });

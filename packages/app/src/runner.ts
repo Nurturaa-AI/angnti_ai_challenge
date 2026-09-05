@@ -1,8 +1,9 @@
-import { RequestError, type AnalysisConfig, type CollectOptions, type ExplorationBudget, type LlmClient, type PrecisionPolicy } from "@repo-arch/shared";
+import { randomUUID } from "node:crypto";
+import { RequestError, resolveProvenance, type AnalysisConfig, type CollectOptions, type ExplorationBudget, type LlmClient, type PrecisionPolicy } from "@repo-arch/shared";
 import { buildArchitectureGraph } from "./architecture";
 import { AnalysisEventBus, PHASE_MESSAGES, logFailureMessage, safeFailureMessage } from "./lifecycle";
 import { buildAnalysisReport, type AnalysisReport } from "./report";
-import { analyzeRepository, DEFAULT_ANALYSIS_SYSTEM, systemSupportsFocus, type AnalysisSystem } from "./service";
+import { analyzeRepository, DEFAULT_ANALYSIS_SYSTEM, SYSTEM_VERSIONS, systemSupportsFocus, type AnalysisSystem } from "./service";
 import { projectEvidence } from "./store/projection";
 import { AnalysisNotFoundError } from "./store/types";
 import type { AnalysisPhase, AnalysisRecord, AnalysisStore } from "./store/types";
@@ -43,6 +44,13 @@ export interface AnalysisRunnerDependencies {
   budget?: ExplorationBudget | undefined;
   precisionPolicy?: PrecisionPolicy | undefined;
   collectOptions?: CollectOptions | undefined;
+  /**
+   * Where runs from this process originated: `local-dev`, `ci-nightly`,
+   * `iteration-6-baseline`. Defaults to `REPO_ARCHAEOLOGIST_PROVENANCE`, then to
+   * `unlabelled`. Recorded on every record, and never a substitute for the system
+   * version beside it.
+   */
+  provenance?: string | undefined;
   now?: (() => Date) | undefined;
   /** Where an unexpected failure is reported in full. Defaults to stderr. */
   logError?: ((message: string) => void) | undefined;
@@ -84,6 +92,26 @@ export class AnalysisRunner {
   private readonly now: () => Date;
   private readonly logError: (message: string) => void;
   private nextId = 1;
+  /**
+   * Identifies this runner, so the counter beside it only has to be unique within
+   * one. A timestamp alone was not enough: two runners constructed in the same
+   * millisecond — two workers starting together, two harnesses in one test — got
+   * the same prefix and then the same ids, which a durable store cannot tolerate.
+   * Four random characters close that without lengthening the id much, and without
+   * a dependency. They join the timestamp inside one opaque segment rather than
+   * adding a third, because the id's shape — one slug then a counter — is what
+   * callers and the API surface already treat as the contract.
+   */
+  private readonly idPrefix: string;
+  /**
+   * Validated once, in the constructor.
+   *
+   * `resolveProvenance` rejects anything that is not a short slug, which matters
+   * because this value is persisted and then served: a shell mistake like
+   * `--provenance "$(cat .env)"` must fail at startup rather than becoming a row
+   * in the database and then a field in an API response.
+   */
+  private readonly provenance: string;
   /** Analyses this runner is executing right now. */
   private readonly live = new Set<string>();
   /** Of those, the ones whose record has stopped existing under them. */
@@ -92,6 +120,8 @@ export class AnalysisRunner {
   constructor(private readonly dependencies: AnalysisRunnerDependencies) {
     this.now = dependencies.now ?? ((): Date => new Date());
     this.logError = dependencies.logError ?? ((message: string): void => console.error(message));
+    this.idPrefix = `${this.now().getTime().toString(36)}${randomUUID().slice(0, 4)}`;
+    this.provenance = resolveProvenance(dependencies.provenance);
   }
 
   /** True while this runner is executing the analysis. */
@@ -148,6 +178,11 @@ export class AnalysisRunner {
       repositoryPath: normalizeRequestedPath(request.repository),
       repositoryName: repositoryNameOf(request.repository, this.dependencies.workspaceRoot),
       system,
+      // Both recorded now rather than on completion, so that a run which fails
+      // still says which build produced it and where it came from — the two runs
+      // hardest to explain later are the ones that failed.
+      systemVersion: SYSTEM_VERSIONS[system],
+      provenance: this.provenance,
       provider: this.dependencies.config.provider,
       model: this.dependencies.config.model,
       focus: request.focus,
@@ -344,15 +379,15 @@ export class AnalysisRunner {
   }
 
   /**
-   * `an-1`, `an-2`, …, with the process start time as a prefix.
+   * `an-1`, `an-2`, …, prefixed by an identifier for this runner.
    *
    * Ids have to be unique across restarts now that the store is durable, and they
-   * have to stay short enough to appear in a URL a person reads. A timestamp plus
-   * a counter gives both without a dependency: unique unless two processes start
-   * in the same millisecond, and sortable by accident rather than by promise.
+   * have to stay short enough to appear in a URL a person reads. The prefix is
+   * where uniqueness comes from and the counter only orders within one runner, so
+   * two runners started in the same millisecond mint different ids.
    */
   private mintId(): string {
-    return `an-${this.now().getTime().toString(36)}-${this.nextId++}`;
+    return `an-${this.idPrefix}-${this.nextId++}`;
   }
 }
 

@@ -64,6 +64,8 @@ FLAGS
   --cases <dir>          Case directory for evaluate (default: ${DEFAULT_CASES_DIR}).
   --case <id>            Evaluate only this case id. Repeatable.
   --system <name>        System to evaluate: "${BASELINE_SYSTEM_NAME}" or "${ADVANCED_SYSTEM_NAME}".
+  --provenance <label>   Where this run came from, e.g. iteration-6-baseline. Recorded in the result
+                         alongside the system version and the benchmark version, which it never replaces.
   --case-delay <s>       Seconds to wait between cases. Use it to stay under a rate limit.
   --quiet                Suppress the briefing on stdout; still writes files.
   -h, --help             Show this message.
@@ -90,6 +92,8 @@ EVIDENCE PRECISION (advanced only; applies after synthesis, opens no files)
 ENVIRONMENT
   GEMINI_API_KEY         Required unless --mock. Copy .env.example to .env.
                          The key is never printed and never written to any output file.
+  REPO_ARCHAEOLOGIST_PROVENANCE
+                         Default for --provenance, so a CI job labels its runs without a flag.
 `;
 
 interface ParsedArgs {
@@ -102,6 +106,7 @@ interface ParsedArgs {
   casesDir: string | undefined;
   caseIds: string[];
   system: string | undefined;
+  provenance: string | undefined;
   caseDelaySeconds: number | undefined;
   focus: string | undefined;
   quiet: boolean;
@@ -119,6 +124,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     casesDir: undefined,
     caseIds: [],
     system: undefined,
+    provenance: undefined,
     caseDelaySeconds: undefined,
     focus: undefined,
     quiet: false,
@@ -185,6 +191,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         break;
       case "--system":
         parsed.system = requireValue("--system", argv[++index]);
+        break;
+      case "--provenance":
+        parsed.provenance = requireValue("--provenance", argv[++index]);
         break;
       case "--case-delay":
         parsed.caseDelaySeconds = requireNumber("--case-delay", argv[++index]);
@@ -387,6 +396,7 @@ async function commandEvaluate(args: ParsedArgs): Promise<number> {
     trajectoryDir: "trajectories",
     config,
     caseIds: args.caseIds,
+    provenance: args.provenance,
     // Only the advanced system reads a budget; passing it unconditionally would be
     // harmless but misleading in the run record.
     budget: system === ADVANCED_SYSTEM_NAME ? loadExplorationBudget(args.budget) : undefined,
@@ -396,12 +406,24 @@ async function commandEvaluate(args: ParsedArgs): Promise<number> {
   });
 
   const metrics = output.report.metrics;
+  const benchmarkReport = output.benchmarkReport;
   process.stdout.write(
     [
       "",
       `System: ${output.report.system} v${output.report.systemVersion} ` +
         `(${output.report.provider}/${output.report.model}, seed ${output.report.seed}, ` +
         `thinking ${output.report.thinkingLevel})`,
+      // The three identities, printed apart from one another on purpose: a run is
+      // only reproducible if you can tell which code ran, which dataset it ran
+      // against, and where the run came from.
+      `Provenance: ${benchmarkReport === null ? "unlabelled (no benchmark manifest)" : benchmarkReport.provenance}`,
+      `Benchmark: ${
+        benchmarkReport === null
+          ? "none — the cases directory has no manifest beside it"
+          : `${benchmarkReport.benchmark.name} ${benchmarkReport.benchmark.version} · ` +
+            `${benchmarkReport.benchmark.evaluatedQuestions}/${benchmarkReport.benchmark.totalCount} question(s) scored` +
+            `${benchmarkReport.benchmark.complete ? "" : " (partial run)"}`
+      }`,
       "",
       `Evidence-backed task accuracy: ${(metrics.evidenceBackedTaskAccuracy * 100).toFixed(1)}% ` +
         `(${metrics.evidenceBackedAnswers}/${metrics.totalQuestions})`,
@@ -409,6 +431,21 @@ async function commandEvaluate(args: ParsedArgs): Promise<number> {
         `(${metrics.correctAnswers}/${metrics.totalQuestions})`,
       `Cases: ${metrics.totalCases} total, ${metrics.passedCases} fully correct, ` +
         `${metrics.evidenceBackedCases} fully cited, ${metrics.failedCases} failed`,
+      // Per set, never only combined: a combined average is exactly where a
+      // regression on the frozen set would hide behind a gain on the new one.
+      ...(benchmarkReport === null
+        ? []
+        : [
+            "",
+            "Per set (evidence-backed / answer accuracy):",
+            ...benchmarkReport.sets.map(
+              (set) =>
+                `  ${set.id}${set.frozen ? " [frozen]" : ""}: ` +
+                `${(set.metrics.evidenceBackedTaskAccuracy * 100).toFixed(1)}% / ` +
+                `${(set.metrics.answerAccuracy * 100).toFixed(1)}% ` +
+                `over ${set.metrics.totalQuestions} of ${set.declaredQuestions} question(s)`,
+            ),
+          ]),
       "",
       `results:  ${output.jsonPath}`,
       `summary:  ${output.markdownPath}`,

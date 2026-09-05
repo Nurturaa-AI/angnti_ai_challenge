@@ -36,7 +36,7 @@ import type {
  */
 
 /** Bumped when the schema changes in a way `migrate` has to know about. */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS meta (
@@ -54,6 +54,8 @@ const SCHEMA = [
      summary         TEXT NOT NULL DEFAULT '',
      error           TEXT,
      system          TEXT NOT NULL,
+     system_version  TEXT,
+     provenance      TEXT,
      provider        TEXT NOT NULL,
      model           TEXT NOT NULL,
      focus           TEXT,
@@ -83,6 +85,44 @@ const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS questions_order ON questions (analysis_id, ordinal)`,
 ] as const;
 
+/**
+ * Schema upgrades, keyed by the version each one produces.
+ *
+ * `CREATE TABLE IF NOT EXISTS` is why these have to exist at all: on a database that
+ * already has an `analyses` table, the statement above is a no-op and the new columns
+ * never appear. So the DDL and the migration say the same thing twice — once for a
+ * database being created, once for one being upgraded — and the price of that
+ * duplication is what makes an existing file readable instead of quietly wrong.
+ *
+ * Version 2 adds the two identity columns Iteration 6 needs. Both are nullable, and
+ * that nullability is the point: a row written by version 1 genuinely does not know
+ * which build produced it or where the run came from, and backfilling a plausible
+ * value would be inventing provenance rather than recording it. `null` reads as
+ * *unrecorded* everywhere above this layer.
+ */
+const MIGRATIONS: Record<number, (db: DatabaseSync) => void> = {
+  2: (db) => {
+    addColumn(db, "analyses", "system_version", "TEXT");
+    addColumn(db, "analyses", "provenance", "TEXT");
+  },
+};
+
+/**
+ * Adds a column unless it is already there.
+ *
+ * SQLite has no `ADD COLUMN IF NOT EXISTS`, and re-running a completed migration must
+ * not be fatal — a database can reach the right shape by either route, and an upgrade
+ * that throws on an already-upgraded file is an upgrade nobody dares run twice.
+ *
+ * The identifiers are interpolated because SQLite cannot bind them, so they must come
+ * from this module's own constants and never from a caller.
+ */
+function addColumn(db: DatabaseSync, table: string, column: string, type: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (columns.some((entry) => entry.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+}
+
 /** An in-memory database. Real SQL semantics, nothing on disk. */
 export const MEMORY_DATABASE = ":memory:";
 
@@ -105,6 +145,8 @@ interface AnalysisRow {
   summary: string;
   error: string | null;
   system: string;
+  system_version: string | null;
+  provenance: string | null;
   provider: string;
   model: string;
   focus: string | null;
@@ -135,12 +177,14 @@ export class SqliteAnalysisStore implements AnalysisStore {
   }
 
   /**
-   * Creates the schema if absent and refuses a database from the future.
+   * Creates the schema if absent, upgrades an older file, and refuses one from
+   * the future.
    *
    * Refusing is the safe direction: an older binary opening a newer file cannot
    * know which columns it is about to ignore, and silently ignoring a column is
-   * how a durable store starts losing data. An *older* file is upgraded in
-   * place, which for version 1 means there is nothing to do.
+   * how a durable store starts losing data. An *older* file is upgraded in place,
+   * one version at a time, inside the same transaction as the version bump — so
+   * a database is never left claiming a version whose migration did not finish.
    */
   private initialize(): void {
     this.db.exec("PRAGMA journal_mode = WAL");
@@ -171,8 +215,16 @@ export class SqliteAnalysisStore implements AnalysisStore {
           `database schema version ${version} is newer than this build understands (${SCHEMA_VERSION})`,
         );
       }
-      // version < SCHEMA_VERSION: run the migrations between them. None yet.
       if (version < SCHEMA_VERSION) {
+        // One step at a time, and a missing step is an error rather than a skip:
+        // jumping a version would leave the file shaped like neither.
+        for (let next = version + 1; next <= SCHEMA_VERSION; next += 1) {
+          const migration = MIGRATIONS[next];
+          if (migration === undefined) {
+            throw new Error(`no migration from schema version ${next - 1} to ${next}`);
+          }
+          migration(this.db);
+        }
         this.db
           .prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'")
           .run(String(SCHEMA_VERSION));
@@ -217,8 +269,9 @@ export class SqliteAnalysisStore implements AnalysisStore {
         .prepare(
           `INSERT INTO analyses
              (id, created_at, updated_at, status, phase, repository_path, repository_name,
-              summary, error, system, provider, model, focus, duration_ms, report, graph)
-           VALUES (?, ?, ?, 'queued', NULL, ?, ?, '', NULL, ?, ?, ?, ?, NULL, NULL, NULL)`,
+              summary, error, system, system_version, provenance, provider, model, focus,
+              duration_ms, report, graph)
+           VALUES (?, ?, ?, 'queued', NULL, ?, ?, '', NULL, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
         )
         .run(
           input.id,
@@ -227,6 +280,8 @@ export class SqliteAnalysisStore implements AnalysisStore {
           input.repositoryPath,
           input.repositoryName,
           input.system,
+          input.systemVersion ?? null,
+          input.provenance ?? null,
           input.provider,
           input.model,
           input.focus ?? null,
@@ -269,6 +324,10 @@ export class SqliteAnalysisStore implements AnalysisStore {
       error: row.error,
       metadata: {
         system: row.system as AnalysisSystem,
+        // Null for a row written before schema version 2, and reported as
+        // unrecorded rather than guessed at. See `MIGRATIONS`.
+        systemVersion: row.system_version,
+        provenance: row.provenance,
         provider: row.provider,
         model: row.model,
         focus: row.focus,

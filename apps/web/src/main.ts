@@ -11,12 +11,15 @@ import {
   type AnalysisStore,
 } from "@repo-arch/app";
 import {
+  DEFAULT_PROVENANCE,
+  PROVENANCE_ENV_VAR,
   formatError,
   loadConfig,
   loadDotEnv,
   loadExplorationBudget,
   loadPrecisionPolicy,
   describeConfig,
+  resolveProvenance,
   type ConfigOverrides,
   type ExplorationBudgetOverrides,
   type PrecisionPolicyOverrides,
@@ -59,6 +62,10 @@ FLAGS
                       ":memory:" keeps analyses only for the life of the process.
                       It may not be inside the workspace named by --root.
   --mock              Use the offline deterministic provider. No API key, no cost.
+  --provenance <label>
+                      Where this run came from, e.g. iteration-6-baseline. Recorded on
+                      every analysis started from the browser and shown on its report.
+                      Default: ${PROVENANCE_ENV_VAR}, then "${DEFAULT_PROVENANCE}".
   --model <id>        Model id (default: from REPO_ARCHAEOLOGIST_MODEL).
   --seed <n>          Sampling seed.
   --thinking <level>  low | medium | high.
@@ -90,6 +97,7 @@ interface ParsedArgs {
   host: string | undefined;
   system: string | undefined;
   db: string | undefined;
+  provenance: string | undefined;
   overrides: ConfigOverrides;
   budget: ExplorationBudgetOverrides;
   precision: PrecisionPolicyOverrides;
@@ -103,6 +111,7 @@ export function parseWebArgs(argv: readonly string[]): ParsedArgs {
     host: undefined,
     system: undefined,
     db: undefined,
+    provenance: undefined,
     overrides: {},
     budget: {},
     precision: {},
@@ -157,6 +166,9 @@ export function parseWebArgs(argv: readonly string[]): ParsedArgs {
         break;
       case "--db":
         parsed.db = take();
+        break;
+      case "--provenance":
+        parsed.provenance = take();
         break;
       case "--mock":
         parsed.overrides.provider = "mock";
@@ -232,6 +244,10 @@ async function main(argv: readonly string[]): Promise<number> {
 
   loadDotEnv();
   const config = loadConfig(args.overrides);
+  // Resolved here rather than left to the runner so that a malformed label stops the
+  // process before anything binds a port, and so the banner below prints the label
+  // that will actually be stored rather than the one that was typed.
+  const provenance = resolveProvenance(args.provenance);
   const workspaceRoot = path.resolve(args.root ?? process.cwd());
 
   const databaseLocation = resolveDatabaseLocation({
@@ -252,6 +268,7 @@ async function main(argv: readonly string[]): Promise<number> {
       host: args.host,
       port: args.port,
       store,
+      provenance,
     });
   } catch (error) {
     // The database is open by now. Closing it before rethrowing keeps a failed start
@@ -271,6 +288,7 @@ async function main(argv: readonly string[]): Promise<number> {
       `provider:   ${String(described.provider)} / ${String(described.model)}`,
       `api key:    ${String(described.apiKey)}`,
       `default:    ${args.system ?? DEFAULT_ANALYSIS_SYSTEM} system`,
+      `provenance: ${provenance}`,
       "",
       "Open the URL above. Ctrl-C to stop.",
       "",

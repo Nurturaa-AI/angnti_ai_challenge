@@ -678,6 +678,28 @@ function render() {
     return;
   }
 
+  // A record that has not finished has no report, and every section renderer below
+  // reads one. This is the ordinary state of a fresh run, not an edge case: both
+  // submitting the form and opening a running analysis from the list adopt a record
+  // whose `report` is null and then render. The progress panel has its own host
+  // outside `<main>` and is already saying what is happening, so what belongs here is
+  // a placeholder — not an empty dashboard, and not a report that does not exist.
+  if (!state.analysis.report) {
+    main.append(
+      el(
+        "section",
+        { class: "empty" },
+        el("h1", { text: "Reading the repository." }),
+        el("p", {
+          text:
+            "The sections fill in as soon as the analysis finishes. This run is saved already — " +
+            "closing the page will not stop it, and the list will still have it when you come back.",
+        }),
+      ),
+    );
+    return;
+  }
+
   const renderer = {
     overview: renderOverview,
     architecture: renderArchitecture,
@@ -696,16 +718,20 @@ function renderNav() {
   const nav = $("nav");
   clear(nav);
   const analysis = state.analysis;
-  const counts = analysis
-    ? {
-        components: analysis.report.components.length,
-        flows: analysis.report.flows.length,
-        dependencies: analysis.report.dependencies.length,
-        architecture: analysis.graph.summary.nodeCount,
-        evidence: analysis.report.evidence.length,
-        questions: analysis.questions.length,
-      }
-    : {};
+  // Counts describe a finished report. While one is still running there is nothing to
+  // count, and reaching for `report.components` here is what used to throw the moment
+  // the form was submitted — the section labels still render, without their tallies.
+  const counts =
+    analysis && analysis.report
+      ? {
+          components: analysis.report.components.length,
+          flows: analysis.report.flows.length,
+          dependencies: analysis.report.dependencies.length,
+          architecture: analysis.graph?.summary.nodeCount,
+          evidence: analysis.report.evidence.length,
+          questions: analysis.questions.length,
+        }
+      : {};
 
   for (const section of SECTIONS) {
     const count = counts[section.id];

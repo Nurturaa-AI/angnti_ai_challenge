@@ -246,3 +246,44 @@ describe("what the browser is allowed to ask for", () => {
     expect(appJs).not.toContain(internal);
   });
 });
+
+/**
+ * The entry point's flags and the help it prints.
+ *
+ * `main.ts` hand-rolls both: a `switch` that accepts flags and a template literal that
+ * documents them, with nothing connecting the two. Adding `--provenance` in Iteration 6
+ * meant editing both halves, and forgetting either half is silent — an accepted flag
+ * nobody can discover, or a documented flag that errors out as unknown.
+ *
+ * Names only. This asserts that the two lists agree, not how the help is worded, so
+ * rewording a description or reordering the block breaks nothing.
+ */
+describe("the web entry point documents the flags it accepts", () => {
+  const mainTs = readFileSync(fileURLToPath(new URL("../src/main.ts", import.meta.url)), "utf8");
+  const usage = mainTs.slice(mainTs.indexOf("const USAGE = `"), mainTs.indexOf("\n`;\n"));
+
+  // `--` on its own is the `pnpm web --` separator, which the parser skips and the help
+  // shows as syntax; the pattern requires a letter after the dashes, so it matches neither.
+  const documented = new Set(usage.match(/--[a-z][a-z-]*/g) ?? []);
+  const accepted = new Set(matchAll(mainTs, /case "(--[a-z-]+)":/g));
+
+  it("accepts flags, and enough of them to be worth checking", () => {
+    expect(accepted.size).toBeGreaterThan(10);
+  });
+
+  it("documents every flag it accepts", () => {
+    expect([...accepted].filter((flag) => !documented.has(flag))).toEqual([]);
+  });
+
+  it("accepts every flag it documents", () => {
+    expect([...documented].filter((flag) => !accepted.has(flag))).toEqual([]);
+  });
+
+  it("hands the run's provenance to the server rather than resolving it twice", () => {
+    // The identity has one source on this path. A second `resolveProvenance` call at a
+    // later layer could disagree with the label the banner printed.
+    expect(mainTs).toContain("const provenance = resolveProvenance(args.provenance)");
+    expect(mainTs).toContain("provenance,");
+    expect(mainTs).toContain("`provenance: ${provenance}`");
+  });
+});

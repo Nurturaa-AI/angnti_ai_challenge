@@ -139,6 +139,68 @@ describe("AnalysisRunner — the record exists before the work", () => {
   });
 });
 
+describe("AnalysisRunner — ids are unique across runners, not just within one", () => {
+  /**
+   * The regression this guards is a primary-key collision in a durable store.
+   *
+   * Ids used to be `an-<now in base 36>-<counter>`, where the counter restarts at 1
+   * in every runner. Two runners constructed in the same millisecond therefore
+   * produced the same prefix and then the same ids — and once the store was durable,
+   * the second `create` was writing over the first analysis rather than beside it.
+   * A millisecond is a long time: two workers starting together, or two harnesses in
+   * one test file, land inside it easily.
+   */
+  it("mints different ids from two runners constructed at the same instant", async () => {
+    // A frozen clock is the point: it reproduces the collision exactly rather than
+    // hoping two constructors land in the same millisecond by luck.
+    const instant = new Date("2026-09-05T00:00:00.000Z");
+    const stores = [
+      new SqliteAnalysisStore({ location: MEMORY_DATABASE }),
+      new SqliteAnalysisStore({ location: MEMORY_DATABASE }),
+    ];
+    const runners = stores.map(
+      (store) =>
+        new AnalysisRunner({
+          store,
+          events: new AnalysisEventBus(),
+          workspaceRoot: workspace,
+          config,
+          client: createLlmClient(config),
+          now: () => instant,
+          logError: () => {},
+        }),
+    );
+
+    const started = await Promise.all(runners.map((runner) => runner.start({ repository: "widget" })));
+    const ids = started.map((start) => start.record.id);
+
+    expect(ids[0]).not.toBe(ids[1]);
+    // Still one opaque segment then a counter, because that shape is what the API
+    // surface and the URLs a person reads already treat as the contract.
+    for (const id of ids) expect(id).toMatch(/^an-[a-z0-9]+-\d+$/);
+
+    await Promise.all(started.map((start) => start.completion));
+    await Promise.all(stores.map((store) => store.close()));
+  });
+
+  it("keeps the counter ordering runs within one runner", async () => {
+    const { runner, store } = harness();
+
+    const first = await runner.start({ repository: "widget" });
+    const second = await runner.start({ repository: "widget" });
+
+    // Same prefix, successive counters: the prefix carries uniqueness, the counter
+    // only orders. Losing that would make ids unreadable for no gain.
+    const prefix = (id: string): string => id.slice(0, id.lastIndexOf("-"));
+    expect(prefix(second.record.id)).toBe(prefix(first.record.id));
+    expect(first.record.id).toMatch(/-1$/);
+    expect(second.record.id).toMatch(/-2$/);
+
+    await Promise.all([first.completion, second.completion]);
+    await store.close();
+  });
+});
+
 describe("AnalysisRunner — a completed analysis", () => {
   it("records the report, the graph, the projected evidence and a duration", async () => {
     const { runner, store } = harness();
@@ -327,7 +389,15 @@ describe("AnalysisRunner — a failed analysis", () => {
       repositoryName: "widget",
       summary: "",
       error: null,
-      metadata: { system: "advanced", provider: "mock", model: "test-model", focus: null, durationMs: null },
+      metadata: {
+        system: "advanced",
+        systemVersion: null,
+        provenance: null,
+        provider: "mock",
+        model: "test-model",
+        focus: null,
+        durationMs: null,
+      },
       report: null,
       graph: null,
       evidence: [],

@@ -1,0 +1,213 @@
+{
+  "id": "case-003-orders-api-challenge",
+  "title": "orders-api — challenge set: what the readme does not say",
+  "repository": "fixtures/orders-api",
+  "set": "challenge-v2",
+  "notes": "Challenge Set v2 for the same repository as case-001. Deliberately weighted away from the readme: of the twelve questions here, only q08 and q10 can be answered from prose alone, and both still require a code citation to score evidence-backed. The rest live in constructor arguments (q06), middleware registration order (q03), a transaction helper two files away from the thing it protects (q05), and the gap between what a test file looks like and what it exercises (q09). case-001 measures whether a system can read; this measures whether it can look.",
+  "questions": [
+    {
+      "id": "challenge-v2-orders-q01",
+      "question": "What port does the service listen on when PORT is not set in the environment?",
+      "field": "any",
+      "expectedAnswer": "4000. loadConfig reads Number(env.PORT ?? 4000), and the readme repeats the default.",
+      "expectedKeywords": ["4000"],
+      "anyOfKeywords": [["port"]],
+      "mustNotContain": ["default port 3000", "listens on port 8080"],
+      "expectedEvidence": ["src/config.js", "README.md"],
+      "evidenceRationale": "The literal 4000 appears in exactly one place in the source — the fallback in src/config.js — and once in prose in README.md. A citation to either shows the default instead of asserting it; anything else is a guess that happens to be right.",
+      "category": "direct-fact",
+      "tags": ["configuration", "http"],
+      "difficulty": "easy"
+    },
+    {
+      "id": "challenge-v2-orders-q02",
+      "question": "Which environment variables must be present for the service to start, and what happens when one is missing?",
+      "field": "any",
+      "expectedAnswer": "DATABASE_URL, KAFKA_BROKERS and JWT_SECRET. loadConfig collects the missing ones and throws \"Missing required configuration: ...\", so the process fails at startup rather than at first use.",
+      "expectedKeywords": ["database_url", "kafka_brokers", "jwt_secret"],
+      "anyOfKeywords": [["missing"], ["throw"], ["required"]],
+      "mustNotContain": ["aws secrets manager", "hashicorp vault"],
+      "expectedEvidence": ["src/config.js"],
+      "evidenceRationale": "The three names appear together only in the `required` array at the top of src/config.js. README.md mentions a Postgres URL and a broker list without naming the variables and never mentions JWT_SECRET as a startup requirement, so a readme-only answer cannot complete the list.",
+      "category": "configuration-dependency",
+      "tags": ["configuration", "startup", "failure-mode"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "challenge-v2-orders-q03",
+      "question": "Authentication is applied with app.use, which has no path filter. How can a load balancer still probe /health without a token?",
+      "field": "any",
+      "expectedAnswer": "Because Express runs middleware in registration order and healthRouter is mounted before authenticate: src/server.js does app.use(\"/health\", healthRouter) and only then app.use(authenticate(...)), so a request to /health is answered before it ever reaches the auth middleware.",
+      "expectedKeywords": ["health"],
+      "anyOfKeywords": [
+        ["before", "authenticate"],
+        ["order", "middleware"],
+        ["mounted", "first"]
+      ],
+      "mustNotContain": ["/health requires authentication", "health endpoint is authenticated"],
+      "expectedEvidence": ["src/server.js"],
+      "evidenceRationale": "The exemption is not a property of either route or of the auth middleware — it is a property of the order of two adjacent app.use calls, which exists only in src/server.js. README.md and src/middleware/auth.js both state that /health is public, but neither shows why, so citing them supports the conclusion without supporting the reasoning.",
+      "category": "cross-file-reasoning",
+      "tags": ["auth", "middleware", "ordering"],
+      "difficulty": "hard"
+    },
+    {
+      "id": "challenge-v2-orders-q04",
+      "question": "What does POST /orders do, in order, between receiving a request and returning 201?",
+      "field": "any",
+      "expectedAnswer": "It parses the body with the zod OrderRequest schema, prices the order, reserves inventory, inserts the order row with the reservation id, publishes order.created, and responds 201. Reservation deliberately precedes persistence so a reservation failure never leaves a stored order that was never fulfillable.",
+      "expectedKeywords": ["reserve"],
+      "anyOfKeywords": [
+        ["price", "insert"],
+        ["price", "publish"],
+        ["validate", "publish"]
+      ],
+      "mustNotContain": [
+        "inventory is reserved after the order row is inserted",
+        "publishes before reserving"
+      ],
+      "expectedEvidence": ["src/routes/orders.js"],
+      "evidenceRationale": "The whole sequence is the body of one handler in src/routes/orders.js, including the comment that explains why the order of operations matters. No other file contains the sequence, and the readme lists the same activities without ordering them.",
+      "category": "behavioral-flow",
+      "tags": ["request-flow", "ordering"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "challenge-v2-orders-q05",
+      "question": "Is reserving stock atomic across all the lines of one order?",
+      "field": "any",
+      "expectedAnswer": "Yes. reserveInventory wraps its whole per-line loop in withTransaction, which issues BEGIN, COMMIT on success and ROLLBACK on any throw. A shortfall on a later line therefore undoes the decrements already applied to earlier lines: every line is reserved, or none is.",
+      "expectedKeywords": ["transaction"],
+      "anyOfKeywords": [["rollback"], ["or none of them"], ["begin"], ["all"]],
+      "mustNotContain": ["each line is committed separately", "reservations are not transactional"],
+      "expectedEvidence": ["src/lib/db.js", "src/services/inventory.js"],
+      "evidenceRationale": "The words in this question — \"atomic\", \"atomicity\" — appear nowhere in the repository. The answer is spread across two files that use different vocabulary for it: src/services/inventory.js says \"for every line, or none of them\" and src/lib/db.js implements it as BEGIN/COMMIT/ROLLBACK. A system that searches for the question's own terms finds nothing.",
+      "category": "keyword-mismatch",
+      "tags": ["transactions", "vocabulary-gap", "inventory"],
+      "difficulty": "hard"
+    },
+    {
+      "id": "challenge-v2-orders-q06",
+      "question": "How many concurrent Postgres connections can this service hold open, and is that limit documented anywhere?",
+      "field": "any",
+      "expectedAnswer": "Ten. The pool is constructed as new pg.Pool({ connectionString, max: 10 }) in src/lib/db.js. It is documented nowhere: the readme only says a Postgres URL is required.",
+      "expectedKeywords": ["pool"],
+      "anyOfKeywords": [
+        ["max", "10"],
+        ["10", "connection"]
+      ],
+      "mustNotContain": ["the pool size is unbounded", "connections are created per request"],
+      "expectedEvidence": ["src/lib/db.js"],
+      "evidenceRationale": "The limit exists only as an object property in a module-level constructor call in src/lib/db.js — no prose, no configuration variable, no default worth restating. It is the kind of operational fact that is invisible to any system that reads documentation and manifests and stops there.",
+      "category": "indirect-evidence",
+      "tags": ["database", "operational-limit", "undocumented"],
+      "difficulty": "hard"
+    },
+    {
+      "id": "challenge-v2-orders-q07",
+      "question": "Where is the SQL that decrements stock, as distinct from the SQL that reads prices?",
+      "field": "any",
+      "expectedAnswer": "In src/services/inventory.js: UPDATE inventory SET available = available - $1 WHERE sku = $2, alongside the SELECT ... FOR UPDATE that guards it. The price read is a different statement in a different file, getSkuPrices in src/lib/db.js.",
+      "expectedKeywords": ["inventory"],
+      "anyOfKeywords": [["update inventory"], ["available = available"], ["decrement"]],
+      "mustNotContain": ["prices are decremented", "stock is decremented in src/lib/db.js"],
+      "expectedEvidence": ["src/services/inventory.js"],
+      "evidenceRationale": "This repository puts SQL in two places, and a briefing that cites src/lib/db.js for a claim about stock has cited a file that genuinely contains SQL and genuinely talks to the same database — and still cannot support the claim. Only src/services/inventory.js counts, which is the distinction this question exists to measure.",
+      "category": "evidence-precision",
+      "tags": ["sql", "citation-precision"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "challenge-v2-orders-q08",
+      "question": "Can a client read an order back from this service after creating it?",
+      "field": "any",
+      "expectedAnswer": "No. server.js registers exactly two routers — healthRouter, whose only handler is GET /, and ordersRouter, whose only handler is POST /. Reads are served by a separate reporting service that is not in this repository.",
+      "expectedKeywords": [],
+      "anyOfKeywords": [
+        ["write side"],
+        ["write-side"],
+        ["separate reporting"],
+        ["only write path"],
+        ["no read"]
+      ],
+      "mustNotContain": ["get /orders", "list orders endpoint", "read endpoint for orders"],
+      "expectedEvidence": ["src/server.js", "README.md"],
+      "evidenceRationale": "An absence claim, and the point is that it is established positively rather than by a failed search. src/server.js contains the complete route registration — two routers, both visible in one file — and README.md says outright that reads live elsewhere. Failing to find a GET handler proves nothing; enumerating all the handlers there are does.",
+      "category": "negative-absence",
+      "tags": ["api-surface", "absence"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "challenge-v2-orders-q09",
+      "question": "The readme says there are no integration tests, yet test/orders.test.js boots the Express application with supertest. Which description is accurate?",
+      "field": "testing",
+      "expectedAnswer": "The readme is right about what matters. test/orders.test.js does call createApp() through supertest, but only to assert a 401 on an unauthenticated request — the app is never booted against a real Postgres or Kafka, so src/lib/db.js and src/lib/events.js remain unexercised. The test file's own comment says exactly this.",
+      "expectedKeywords": [],
+      "anyOfKeywords": [
+        ["db.js", "events.js"],
+        ["postgres", "kafka"],
+        ["no integration"]
+      ],
+      "mustNotContain": ["integration tests cover postgres", "kafka is covered by tests"],
+      "expectedEvidence": ["test/orders.test.js", "README.md"],
+      "evidenceRationale": "Two sources point in different directions: a test that instantiates the whole HTTP application looks like integration coverage, and the readme says there is none. The reconciliation is inside test/orders.test.js, whose comment states the boundary. Citing README.md alone repeats a claim; citing the test file settles it.",
+      "category": "competing-evidence",
+      "tags": ["testing", "conflicting-signals"],
+      "difficulty": "hard"
+    },
+    {
+      "id": "challenge-v2-orders-q10",
+      "question": "How is the source tree layered, and which direction do dependencies run between the layers?",
+      "field": "architecture",
+      "expectedAnswer": "Four layers: middleware (cross-cutting auth and error handling), routes (HTTP handlers, one file per resource), services (pricing and inventory business logic) and lib (infrastructure adapters for Postgres and Kafka). Dependencies run one way, routes to services to lib; nothing in lib imports a route or a service.",
+      "expectedKeywords": [],
+      "anyOfKeywords": [
+        ["routes", "services"],
+        ["layer"],
+        ["middleware", "lib"]
+      ],
+      "mustNotContain": ["no separation of concerns", "all logic lives in a single file"],
+      "expectedEvidence": ["src/server.js", "README.md"],
+      "evidenceRationale": "README.md lists the four directories and what each holds, which gets a system most of the way. The direction of the dependencies is not stated anywhere and has to be read off the import lists — src/server.js shows the composition, and every service imports from lib while no lib module imports back.",
+      "category": "architecture-inference",
+      "tags": ["layering", "dependency-direction"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "challenge-v2-orders-q11",
+      "question": "Which declared dependency validates incoming request bodies, and which dependencies exist only for development?",
+      "field": "dependencies",
+      "expectedAnswer": "zod validates request bodies — the OrderRequest schema in src/routes/orders.js parses request.body. The devDependencies are eslint, supertest and vitest.",
+      "expectedKeywords": ["zod"],
+      "anyOfKeywords": [["supertest"], ["vitest"], ["dev"]],
+      "mustNotContain": ["yup", "ajv", "class-validator"],
+      "expectedEvidence": ["package.json"],
+      "evidenceRationale": "package.json is the only file that separates runtime from development dependencies, so it is the only evidence that can support the second half of the answer. The readme lists neither set.",
+      "category": "configuration-dependency",
+      "tags": ["dependencies", "validation", "dev-tooling"],
+      "difficulty": "medium"
+    },
+    {
+      "id": "challenge-v2-orders-q12",
+      "question": "The order row is inserted before order.created is published. What state is the system left in if that publish fails?",
+      "field": "any",
+      "expectedAnswer": "The order row is already committed — insertOrder is its own pool.query, outside the reservation transaction — and the publish failure propagates to next(error) and becomes a 500. The result is a persisted, reserved order with no event, and nothing retries it: events.js deliberately does not swallow the failure, and there is no outbox.",
+      "expectedKeywords": [],
+      "anyOfKeywords": [
+        ["publish", "fail"],
+        ["event", "fail"],
+        ["not swallowed"],
+        ["order.created", "retry"]
+      ],
+      "mustNotContain": [
+        "events are retried automatically",
+        "the event is published inside the same transaction"
+      ],
+      "expectedEvidence": ["src/lib/events.js", "src/routes/orders.js"],
+      "evidenceRationale": "The failure mode is the join of two facts in two files: src/routes/orders.js shows the publish happening after the insert and outside any transaction, and src/lib/events.js shows the failure being allowed to propagate. Neither file alone states the consequence, and no documentation mentions it at all.",
+      "category": "behavioral-flow",
+      "tags": ["failure-mode", "dual-write", "events"],
+      "difficulty": "hard"
+    }
+  ]
+}

@@ -143,6 +143,11 @@ false. The report averages relevance only over questions where it was measurable
 `expectedEvidence` accepts a directory prefix (`src/services/`), which matches any file
 beneath it.
 
+Challenge-set questions additionally carry `category`, `difficulty`, `tags` and
+`evidenceRationale`. Those keys are for grouping failures, they are declared nowhere in
+`EvalCaseSchema`, and the parser therefore strips them before the scorer sees the case — see
+[Metadata cannot reach the scorer](#metadata-cannot-reach-the-scorer).
+
 ### Writing a good question
 
 - **Ask what a new engineer asks on day one.** "Which framework?" and "what breaks if I
@@ -158,16 +163,71 @@ beneath it.
 
 ## Dataset
 
-Two cases, both against generated fixtures ([`scripts/build-fixtures.ts`](../scripts/build-fixtures.ts)),
-seven questions each — 14 questions total.
+Four cases against two generated fixtures ([`scripts/build-fixtures.ts`](../scripts/build-fixtures.ts)),
+**38 questions in two sets**. The split is the point: one set is frozen so numbers stay comparable
+across iterations, the other is hard enough to still have something to say.
 
-| Case | Repository | Discriminates |
-| --- | --- | --- |
-| `case-001-orders-api` | Node/Express write-side service | Manifest reading vs. source reading; a race condition documented only in an incident note |
-| `case-002-pyflow` | Python CLI ETL runner with SQLite state | A non-Node manifest (`pyproject.toml`); dispatch logic that lives only in source |
+| Case | Set | Repository | Questions | Discriminates |
+| --- | --- | --- | --- | --- |
+| `case-001-orders-api` | regression-v1 | Node/Express write-side service | 7 | Manifest reading vs. source reading; a race condition documented only in an incident note |
+| `case-002-pyflow` | regression-v1 | Python CLI ETL runner with SQLite state | 7 | A non-Node manifest (`pyproject.toml`); dispatch logic that lives only in source |
+| `case-003-orders-api-challenge` | challenge-v2 | same fixture, harder questions | 12 | Whether the system *looks*, rather than whether it can read |
+| `case-004-pyflow-challenge` | challenge-v2 | same fixture, harder questions | 12 | Python-specific surfaces: entry points, packaging metadata, lazy validation |
 
 The fixtures are built with pinned author, email and commit dates, so commit hashes are
-reproducible — which matters for a later agent that reads history.
+reproducible — which matters for a later agent that reads history. **No fixture was modified to
+accommodate a question**: the challenge cases ask about the repositories as they already were.
+
+### Regression Set v1 is frozen
+
+The original 14 questions do not change. Not the wording, not the expected answers, not the
+expected evidence, not the forbidden phrases — including when the system fails them. This is what
+lets Iteration 6's number be compared to Iteration 3's at all, and the freeze is checked
+mechanically rather than by intention: `pnpm verify:measured` byte-compares both case files against
+their committed blobs.
+
+The most valuable thing a frozen set does is go stale. By Iteration 5 the advanced system scored
+14/14 on it, which means it had stopped being able to report anything except *not worse*. That is
+the signal to add a set, not to edit the old one.
+
+### Challenge Set v2
+
+24 questions, 12 per repository, written to span the eleven categories in
+[`BENCHMARK_CATEGORIES`](../packages/evaluator/src/benchmark.ts) — direct fact, cross-file
+reasoning, indirect evidence, keyword mismatch, architecture inference, behavioral flow,
+configuration/dependency, negative/absence, competing evidence, evidence precision, multi-language.
+Every category has at least two questions, and the difficulty split is 3 easy / 11 medium / 10 hard.
+
+The distribution that turned out to matter most is not in that list. Regression v1 expects
+documentation evidence for 12 of its 14 questions; Challenge v2 expects **source** evidence for 14
+of 24. That is deliberate, and it is the direct answer to [limitation 7](#limitations): rather than
+widening the frozen lists after seeing which files the system chose — fitting the ruler to the
+result — the new set names implementation files as the expected evidence *from the start*, before
+any system was run against it.
+
+### The manifest, and why counts are derived
+
+[`evaluation/benchmark.json`](../evaluation/benchmark.json) declares the benchmark's identity
+(`repo-archaeologist v2`), its sets, and its counts. `loadBenchmark()` re-derives every count from
+the loaded case files and fails the load when the two disagree:
+
+> The manifest is the declaration and the case files are the dataset. Fix whichever is wrong; do
+> not adjust a count to match a mistake.
+
+So a case added without updating the manifest is a test failure, not a silently changed
+denominator — which is the failure mode that makes a percentage move without anyone changing a
+system.
+
+### Metadata cannot reach the scorer
+
+Challenge questions carry their `category`, `difficulty`, `tags` and `evidenceRationale` inline.
+Frozen questions cannot — that would change their bytes — so their classification lives in the
+manifest's `annotations` map, keyed `caseId/questionId`.
+
+The asymmetry is ugly and it is load-bearing. What makes the inline half safe is that
+`EvalCaseSchema` is a `z.object`, which strips keys it does not declare: the classification is
+provably unable to reach `scoreQuestion`, because the parsed object the scorer receives never
+contains it. A question cannot be scored more leniently for being labelled `hard`.
 
 ## Running it
 
@@ -178,17 +238,44 @@ pnpm evaluate:baseline --mock                   # offline, deterministic, no cos
 pnpm evaluate:baseline --case case-001-orders-api
 pnpm evaluate:baseline --cases ./my-cases --out ./my-results
 pnpm evaluate:advanced -- --model gemini-3.5-flash-lite --case-delay 25
+pnpm evaluate:advanced -- --provenance iteration-6-baseline
 ```
 
 Output in [`evaluation/results/`](../evaluation/results/): a timestamped JSON report, a
 timestamped Markdown summary, and a stable `latest-<system>.{json,md}` pair. The two systems
 write to separate `latest-` files, so a comparison never depends on remembering which run
-happened last.
+happened last. The `latest-` pair is a moving pointer and is overwritten by design; the
+timestamped files are the history.
 
 The report records total cases, passed cases (all questions correct), fully-cited cases,
 failed cases, total questions, correct answers, evidence-backed answers, partial-evidence
 answers, unsupported answers, fabrications, dropped citations, average evidence relevance,
 runtime, token usage, estimated cost, and the full per-question breakdown.
+
+### Three identities, and none of them substitutes for another
+
+A result is only interpretable if you know all three of these, and they answer different questions:
+
+| | Question it answers | Example |
+| --- | --- | --- |
+| `systemVersion` | Which code ran? | `0.1.0` |
+| `provenance` | Where did this run come from? | `iteration-6-baseline` |
+| `benchmark.version` | Which dataset was it measured against? | `v2` |
+
+Two runs of the same `systemVersion` against different benchmark versions are not comparable, and a
+run's provenance is what distinguishes a pre-registered measurement from someone trying a flag.
+Overloading one field to carry another's meaning is how a table of numbers becomes a table of
+numbers that quietly compares different things.
+
+`--provenance` is accepted by both entry points and by the web server, defaults to
+`REPO_ARCHAEOLOGIST_PROVENANCE` and then to `unlabelled`, and is validated before anything binds a
+port or opens a database — a label that fails `/^[a-z0-9][a-z0-9._/-]{0,63}$/` stops the process
+rather than reaching a stored row.
+
+Reports are `schemaVersion` 2. A v1 report on disk is still readable, and `readReportIdentity()`
+returns `null` for its benchmark and provenance rather than defaulting them: an Iteration 3 run
+predates this benchmark, and labelling it `v2` at read time would be inventing a fact about
+history.
 
 ### The evaluator cannot tell the systems apart
 
@@ -231,7 +318,13 @@ there would read as free.
 
 ---
 
-## Current results
+## Results
+
+In iteration order, oldest first. Nothing here is edited when a later run disagrees with it — a
+superseded number is still a true record of what the system did that day, and the
+[latest measurement](#iteration-6--the-benchmark-that-could-still-disagree) is the last section.
+
+### Iterations 1–3, both systems on Regression Set v1
 
 Both systems, same 14 questions, same model, same seed, same thinking level, same evaluator,
 same unmodified cases. Neither run had a failed case.
@@ -377,14 +470,77 @@ nothing; a comparable run needs `--model gemini-3.5-flash-lite --case-delay 20` 
 and it would re-measure a pipeline that did not change. Iteration 3's figures stand as the last
 real measurement, unedited.
 
+### Iteration 6 — the benchmark that could still disagree
+
+Iteration 6 expanded the dataset from 14 questions to 38 and measured the **unchanged** system
+against it before touching any analysis code. `pnpm verify:measured --ref HEAD` reports `OK` and
+both system versions are unchanged at 0.1.0, which is what makes the frozen column below meaningful.
+
+| | Regression Set v1 (frozen) | Challenge Set v2 | Combined |
+| --- | --- | --- | --- |
+| Run id | `eval-advanced-2026-09-05T01-35-25Z` | same run | same run |
+| **Evidence-backed task accuracy** | **100.0 % (14/14)** | **29.2 % (7/24)** | **55.3 % (21/38)** |
+| Answer accuracy | 100.0 % (14/14) | 41.7 % (10/24) | 63.2 % (24/38) |
+| Unsupported answers | 0 | 3 | 3 |
+| Fabrications / dropped citations | 0 / 0 | 0 / 0 | 0 / 0 |
+| Mean evidence relevance | 0.4105 | — | 0.4007 |
+
+`gemini-3.5-flash-lite`, seed 7, thinking `low`, provenance `iteration-6-baseline`, $0.066076.
+
+**The per-set split is not a presentation choice.** The combined 55.3 % is the least informative
+number in the table: it mixes a saturated set with a discriminating one, and it would move if the
+ratio between them changed while nothing about the system did. Reported alone it would have hidden
+both facts worth knowing — that nothing regressed, and that the new questions are hard.
+
+**Nothing regressed, exactly.** Iteration 3's measurement was 100.0 % / 100.0 % with mean evidence
+relevance **0.4105**; the frozen subset of this run scores 100.0 % / 100.0 % with mean evidence
+relevance **0.4105**. Same model, same seed, same fourteen questions, identical to four decimal
+places.
+
+#### Where the failures are
+
+Grouped four ways, one grouping dominates — and it is not the one that looks most likely.
+
+| By evidence kind | n | Answer accuracy | Evidence-backed |
+| --- | --- | --- | --- |
+| documentation | 15 | 93.3 % | 80.0 % |
+| mixed | 8 | 62.5 % | 62.5 % |
+| **source** | **15** | **33.3 %** | **26.7 %** |
+
+Difficulty (easy 81.8 % → medium 66.7 % → hard 41.7 %) and repository (orders-api 73.7 % vs pyflow
+52.6 %) are real gradients but largely restate that table: the hard questions and the pyflow
+questions are disproportionately the source-backed ones. Category is the least useful grouping for
+the same reason — the weakest categories are simply those whose evidence lives in source files.
+
+The obvious reading is a retrieval weakness, and it is wrong. Two diagnostic runs recorded which
+files entered the model's context. Cross-referencing every failure against them: **in 16 of 17
+failures the expected evidence was already in context, un-truncated** — for `orders-api` the system
+read every relevant source file with budget to spare. Exactly one failure was a genuine retrieval
+miss.
+
+What is missing from the briefings is concrete literals the model was looking at: `4000`,
+`database_url`, `kafka_brokers`, `mypy`, `max: 10`. A component claim is one sentence about what a
+module does, and a port number has no place in that sentence — so it is dropped even though the line
+is in context and citable. Three further questions were answered correctly across *separate* claims,
+which the scorer does not credit because no single claim answers the question.
+
+The hypothesis this produces — that source-backed accuracy is limited by claim **granularity**
+rather than by retrieval or grounding — is recorded in full in the
+[improvement changelog](improvement-changelog.md). **No analysis change was made in Iteration 6**:
+the lever the evidence names is the synthesis prompt, which the iteration's constraints put out of
+scope, and every other available single-variable change targets retrieval that the 16/17 split shows
+is not the bottleneck.
+
 <a name="limitations"></a>
 ## Limitations
 
 Stated plainly, because a metric whose weaknesses are undocumented invites being gamed by
 accident.
 
-1. **Two cases, 14 questions.** One question is 7.1 percentage points. Differences smaller
-   than a few questions are noise, and the report says so in a caveat on every run.
+1. **Four cases, 38 questions.** One question is 2.6 percentage points overall — but the number
+   worth quoting is per set, because that is how results are reported: one question is 7.1 points
+   on Regression v1 and 4.2 points on Challenge v2. Differences of a question or two are still
+   noise, and the report says so in a caveat on every run.
 2. **Keyword matching is not comprehension.** A briefing can contain `express` while being
    confused about how it is used. Matching rewards the presence of the right token, not
    understanding — it is the trade taken to keep scoring deterministic and model-free.
@@ -402,25 +558,28 @@ accident.
    questions in the dataset expect evidence from a source file the baseline never opens. Its
    ceiling on those is `partialEvidence`. This is intentional headroom, not an oversight — but
    it means the baseline's score is not a measure of "how good is an LLM at reading code".
-7. **`expectedEvidence` lists only what the baseline could see.** This is the limitation
-   Iteration 1 exposed, it is the most serious one, and **it is still unfixed after Iteration
-   2.** Each question's expected-evidence list was written when reconnaissance context was all
-   any system had, so it names READMEs and manifests. A system that answers correctly while
-   citing the *implementation* — `pipeline.py` for the topological sort, rather than the README
-   sentence describing it — is scored as not evidence-backed. It is penalised for citing the
-   source of truth.
+7. **Regression v1's `expectedEvidence` lists only what the baseline could see.** This is the
+   limitation Iteration 1 exposed, and on the frozen set it is **permanent by construction**. Each
+   of those 14 expected-evidence lists was written when reconnaissance context was all any system
+   had, so it names READMEs and manifests. A system that answers correctly while citing the
+   *implementation* — `pipeline.py` for the topological sort, rather than the README sentence
+   describing it — is scored as not evidence-backed. It is penalised for citing the source of truth.
 
-   Three of Iteration 1's four regressions were this artefact. Iteration 2 fixed two of those
-   three but still loses `pyflow/q3-execution-order` and `orders-api/q4-auth-boundary` to it,
-   which is to say **the two questions the advanced system now fails are both this limitation,
-   not analysis failures.** Both answers are correct; both cite a file that genuinely contains
-   the answer; neither citation is the file the case names.
+   Three of Iteration 1's four regressions were this artefact. Iteration 2 lost
+   `pyflow/q3-execution-order` and `orders-api/q4-auth-boundary` to it; Iteration 3 recovered both,
+   and every advanced run since has scored 14/14 on the set.
 
-   Widening the lists is the obvious fix and it has deliberately **not** been applied, twice
-   now: adjusting `expectedEvidence` after seeing which files the advanced system chose would be
-   fitting the ruler to the result and would make every subsequent number unfalsifiable. The fix
-   belongs to its own iteration, pre-registered and re-run against both systems, with the old
-   numbers left standing.
+   Widening those lists has deliberately **not** been applied, three times now: adjusting
+   `expectedEvidence` after seeing which files the advanced system chose would be fitting the ruler
+   to the result and would make every subsequent number unfalsifiable. Iteration 6 took the other
+   route instead — **Challenge Set v2 does not inherit this flaw.** Its expected evidence names
+   implementation files where the answer actually lives, written before any system was run against
+   it, which is why 14 of its 24 questions are source-backed. The frozen lists stay as they are, and
+   the number they produce stays comparable to 2026-08-31's.
+
+   The cost of that route is visible in the Iteration 6 results: the source-backed group scores
+   33.3 % where the documentation-backed group scores 93.3 %. Some of that gap is a genuinely
+   harder task, and some of it is that the frozen set never asked.
 8. **Fixture repositories are synthetic.** They were written to have the properties the cases
    test. Real repositories are messier, larger, and less tidily documented; scores here are an
    upper bound on what to expect in the wild.
