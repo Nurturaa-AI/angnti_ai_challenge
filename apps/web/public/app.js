@@ -88,6 +88,8 @@ const state = {
   /** A question that failed locally: never stored, so it lives only here. */
   questionError: null,
   narrow: false,
+  /** The evidence id the drawer is showing, or `null` when it is closed. */
+  evidenceOpen: null,
   /** What had focus before the drawer opened, so Escape can give it back. */
   drawerReturn: null,
 };
@@ -227,6 +229,27 @@ async function boot() {
   }
 
   await Promise.all([loadRepositories(), loadAnalyses()]);
+
+  // Open the newest finished analysis, if this workspace has one.
+  //
+  // The workspace is the point of the page and the store is durable, so the second visit
+  // is the common one: arriving at a saved workspace and being shown an empty landing
+  // page — with the analysis you wanted sitting collapsed in a sidebar list — makes
+  // `#architecture` a brochure rather than a view. Newest and `completed` only, because
+  // a running record has no report to show and a failed one is a thing to go and look at
+  // deliberately rather than to be dropped into.
+  //
+  // Read-only, and it starts nothing: this is a `GET` of a record that already exists.
+  if (!state.analysis) {
+    const newest = mostRecentCompleted();
+    if (newest) await openAnalysis(newest.id);
+  }
+
+  // And paint, whatever happened above. `renderNav()` runs only from `render()`, so
+  // until this line the section list in the sidebar was an empty `<ul>` on a cold load:
+  // the only route to `#architecture` was to type it, which is how the primary workspace
+  // came to be reached by URL and greeted with a landing page.
+  render();
 }
 
 async function loadRepositories() {
@@ -251,10 +274,14 @@ async function loadRepositories() {
  *
  * Fetch and render are separate because they fail differently. A list that could not be
  * fetched is an error the user needs to see and can retry; a list that is empty is a
- * normal state with its own words. Iteration 4 re-fetched on every `render()`, which was
- * affordable when the store was a Map in the same process and is not now that it is a
- * file — and which also meant a half-typed delete confirmation was wiped by an unrelated
- * repaint.
+ * normal state with its own words.
+ *
+ * Callers are the four events that can actually change the list — a run started, one
+ * opened, one deleted, one reaching a terminal state — plus the retry button on the
+ * error state. Not `render()`: re-fetching on every repaint was affordable when the
+ * store was a Map in the same process and is not now that it is a file, and it also
+ * wiped a half-typed delete confirmation on an unrelated paint. Every caller `await`s
+ * this before painting, so the list a repaint shows is the list the last fetch left.
  */
 async function loadAnalyses() {
   state.list = { state: state.analyses.length === 0 ? "loading" : "ready", error: null };
@@ -302,6 +329,12 @@ function renderAnalysisList() {
   for (const summary of state.analyses) {
     const row = describeAnalysisRow(summary, now);
     const open = state.analysis?.id === row.id;
+    // The summary is the longest line in the row and the least often wanted. It earns
+    // its place on the analysis you have open, on one that is still running — where it
+    // is the live phase rather than a summary — and on one that failed, where it is the
+    // reason. Everywhere else the name, the status and the path are what you scan by,
+    // and eight rows of three-line prose at 10px are what made the column a wall.
+    const showSummary = open || row.running || row.failed;
 
     list.append(
       el(
@@ -324,11 +357,13 @@ function renderAnalysisList() {
             el("span", { class: `pill pill-${row.tone}`, text: row.statusLabel }),
           ),
           row.pathIsName ? null : el("span", { class: "analysis-path path", text: row.path }),
-          el("span", { class: `analysis-summary${row.failed ? " bad" : ""}`, text: row.running ? row.progress : row.summary }),
+          showSummary
+            ? el("span", { class: `analysis-summary${row.failed ? " bad" : ""}`, text: row.running ? row.progress : row.summary })
+            : null,
           el(
             "span",
             { class: "analysis-times" },
-            el("span", { title: row.createdAbsolute, text: `created ${row.created}` }),
+            el("span", { title: row.createdAbsolute, text: row.created }),
             row.updatedSameAsCreated ? null : el("span", { title: row.updatedAbsolute, text: `updated ${row.updated}` }),
             el("span", { text: row.system }),
             row.questionCount === 0 ? null : el("span", { text: `${row.questionCount}q` }),
@@ -348,6 +383,11 @@ function renderAnalysisList() {
  * and the rest of this page keep every control in the document, and because a native
  * dialog is the one thing a keyboard user cannot navigate back out of. The armed state
  * lives in `state.confirmDelete`, so exactly one row can be armed at a time.
+ *
+ * Arming favours the safe control in all three of the ways one can be reached: Cancel
+ * takes the focus, comes first in source order, and is therefore first for Tab and for
+ * a screen reader. A confirmation step whose destructive button is what a stray Enter
+ * fires is a speed bump with the appearance of a safeguard.
  */
 function deleteControl(row) {
   if (state.confirmDelete !== row.id) {
@@ -360,30 +400,40 @@ function deleteControl(row) {
         state.confirmDelete = row.id;
         renderAnalysisList();
         // Focus follows the control the user was already on, so a keyboard user is not
-        // dropped back at the top of the list.
-        $("recent")?.querySelector(".analysis-confirm")?.focus();
+        // dropped back at the top of the list — but it lands on *Cancel*, not on
+        // "Delete for good". The armed row replaces the button the pointer or the
+        // keyboard was just on, so whatever is focused here can be fired by an Enter
+        // the user has already begun; if that key destroys an analysis and its
+        // evidence, the confirmation step has protected nobody. The safe control takes
+        // the focus and the destructive one is a deliberate reach away.
+        $("recent")?.querySelector(".analysis-cancel")?.focus();
       },
     });
   }
 
+  // Cancel is first in the DOM as well as focused, so it is also what Tab reaches
+  // first and what a screen reader reads first. Source order is the reading order and
+  // the tab order both; putting the destructive control second is the same decision as
+  // not focusing it, applied to the other two ways in.
   return el(
     "span",
     { class: "analysis-confirm-group" },
+    el("button", {
+      type: "button",
+      class: "analysis-cancel ghost",
+      text: "Cancel",
+      "aria-label": `Keep the analysis of ${row.name}`,
+      onclick: () => {
+        state.confirmDelete = null;
+        renderAnalysisList();
+      },
+    }),
     el("button", {
       type: "button",
       class: "analysis-confirm bad-button",
       "aria-label": `Confirm deleting the analysis of ${row.name}, and its evidence`,
       text: "Delete for good",
       onclick: () => void deleteAnalysis(row.id, row.name),
-    }),
-    el("button", {
-      type: "button",
-      class: "ghost",
-      text: "Cancel",
-      onclick: () => {
-        state.confirmDelete = null;
-        renderAnalysisList();
-      },
     }),
   );
 }
@@ -459,9 +509,11 @@ async function openAnalysis(id) {
     // A running analysis opened from the list picks its stream up mid-flight: the
     // server replays the events it has already emitted before going live.
     if (isRunningStatus(state.analysis.status)) watch(id);
-    render();
+    // List first, then paint, as every other caller does. This used to paint, fetch,
+    // and paint the list a second time to move the open-row highlight — which was the
+    // shape it had to be while `render()` fetched the list itself.
     await loadAnalyses();
-    renderAnalysisList();
+    render();
   } catch (error) {
     toast(error.message, "error");
   } finally {
@@ -472,6 +524,11 @@ async function openAnalysis(id) {
 /** Makes a fetched detail payload the open analysis, resetting everything derived. */
 function adoptAnalysis(analysis) {
   stopWatching();
+  // Evidence ids belong to the analysis that minted them. Switching analyses with the
+  // drawer open would leave an artefact from the previous one on screen beside the new
+  // one's report, which is the one thing this product must never do — so the cache goes
+  // and so does whatever it was showing.
+  closeDrawer();
   state.analysis = analysis;
   state.evidence.clear();
   state.questionError = null;
@@ -656,24 +713,45 @@ function setBusy(busy, message) {
 
 // ------------------------------------------------------------------- render
 
+/**
+ * Paints the nav, the workspace and the sidebar list from state. Fetches nothing.
+ *
+ * It used to open with `void loadAnalyses()`, so every repaint issued an HTTP `GET` —
+ * a section change, a diagram/outline toggle, an answered question, each terminal
+ * stream event. The docstring on `loadAnalyses` has argued against exactly that since
+ * Iteration 5 without the call being removed: the list is durable now, and the four
+ * things that can change it (starting a run, opening one, deleting one, and a run
+ * reaching a terminal state) each already `await loadAnalyses()` before calling here.
+ * A fifth, un-awaited fetch on every paint could only ever race them.
+ *
+ * Un-awaited was the worse half. The rejection had no handler — a list fetch that
+ * failed during a repaint went nowhere, and any repaint late in the page's life left a
+ * promise still resolving against a document that was going away. That is what the
+ * browser smoke suite caught: `renderAnalysisList` reaching for `document` after the
+ * window had closed, as an unhandled rejection rather than a failed assertion.
+ */
 function render() {
   renderNav();
-  void loadAnalyses();
+  renderAnalysisList();
   const main = $("main");
   clear(main);
 
+  // No analysis open. The section still decides what is said, because the reader asked
+  // for a section: `#architecture` is a workspace waiting for a graph, not a landing
+  // page, and telling them about citations in general when they asked about the map is
+  // how the primary view ended up looking like a brochure. The action offers the newest
+  // finished analysis when there is one — the common case on a second visit is that the
+  // thing they want is already saved, one click away, and invisible in a sidebar list.
   if (!state.analysis) {
+    const copy = NOTHING_OPEN[state.section] ?? NOTHING_OPEN.overview;
+    const newest = mostRecentCompleted();
     main.append(
-      el(
-        "section",
-        { class: "empty" },
-        el("h1", { text: "Show me where you found it." }),
-        el("p", {
-          text:
-            "Pick a repository and run an analysis. Every claim on the dashboard carries the citations " +
-            "that support it, and every citation opens the artefact it was read from.",
-        }),
-      ),
+      emptyState({
+        ...copy,
+        action: newest
+          ? { label: `Open ${newest.repositoryName}`, onclick: () => void openAnalysis(newest.id) }
+          : undefined,
+      }),
     );
     return;
   }
@@ -686,16 +764,16 @@ function render() {
   // a placeholder — not an empty dashboard, and not a report that does not exist.
   if (!state.analysis.report) {
     main.append(
-      el(
-        "section",
-        { class: "empty" },
-        el("h1", { text: "Reading the repository." }),
-        el("p", {
-          text:
-            "The sections fill in as soon as the analysis finishes. This run is saved already — " +
-            "closing the page will not stop it, and the list will still have it when you come back.",
-        }),
-      ),
+      emptyState({
+        eyebrow: state.analysis.repositoryName,
+        title: state.analysis.status === "failed" ? "This analysis did not finish." : "Reading the repository.",
+        body:
+          state.analysis.status === "failed"
+            ? state.analysis.error ??
+              "The run failed before it produced a report. The record is kept so the failure is not silent."
+            : "The sections fill in as soon as the analysis finishes. This run is saved already — " +
+              "closing the page will not stop it, and the list will still have it when you come back.",
+      }),
     );
     return;
   }
@@ -712,6 +790,11 @@ function render() {
     export: renderExport,
   }[state.section];
   main.append(...renderer(state.analysis));
+}
+
+/** The newest analysis that has a report to show, or `undefined`. */
+function mostRecentCompleted() {
+  return state.analyses.find((summary) => summary.status === "completed");
 }
 
 function renderNav() {
@@ -766,6 +849,12 @@ function head(title, sub) {
  * An empty list is not silence: a claim whose citations all failed grounding is labelled,
  * because the alternative is a sentence that looks exactly as trustworthy as one that
  * passed. The report keeps such claims rather than deleting them, and so does this.
+ *
+ * Each chip is a disclosure button and says so. `aria-controls` names the drawer it
+ * opens, `aria-expanded` says whether that drawer is currently showing *this* citation,
+ * and clicking the chip that is already expanded closes it — so the control that opened
+ * the panel is also the one that puts it away, and the drawer is never something the
+ * reader has to hunt for a way out of.
  */
 function evidenceRow(ids) {
   if (!ids || ids.length === 0) {
@@ -780,7 +869,16 @@ function evidenceRow(ids) {
     { class: "evidence-row" },
     el("span", { text: "Evidence" }),
     ids.map((id) =>
-      el("button", { type: "button", class: "chip", text: id, onclick: () => void openEvidence(id) }),
+      el("button", {
+        type: "button",
+        class: "chip",
+        text: id,
+        "aria-controls": "drawer",
+        // A string either way: an absent `aria-expanded` means "not a disclosure
+        // control", which is a different claim from "closed".
+        "aria-expanded": state.evidenceOpen === id ? "true" : "false",
+        onclick: () => void toggleEvidence(id),
+      }),
     ),
   );
 }
@@ -788,6 +886,91 @@ function evidenceRow(ids) {
 function stat(label, value, kind) {
   return el("div", { class: `stat${kind ? ` ${kind}` : ""}` }, el("b", { text: value }), el("span", { text: label }));
 }
+
+/**
+ * The empty state. One of them.
+ *
+ * `render()` used to answer "no analysis is open" with the same landing copy whichever
+ * section had been asked for, so `#architecture` — the primary workspace — greeted you
+ * with "Show me where you found it" and no mention of architecture. The fix is not five
+ * more branches: it is one shape, taking the sentence that belongs to the section, plus
+ * whatever single action would fill the emptiness if there is one.
+ *
+ * `action` is a `{ label, onclick }` or nothing. Nothing is the honest answer when the
+ * only way forward is the form in the top bar, which is already on screen and already
+ * the first thing in the tab order.
+ */
+function emptyState({ eyebrow, title, body, action }) {
+  return el(
+    "section",
+    { class: "empty" },
+    eyebrow ? el("p", { class: "empty-eyebrow", text: eyebrow }) : null,
+    el("h1", { text: title }),
+    el("p", { text: body }),
+    action
+      ? el(
+          "div",
+          { class: "empty-actions" },
+          el("button", { type: "button", class: "primary", text: action.label, onclick: action.onclick }),
+        )
+      : null,
+  );
+}
+
+/**
+ * What each section says when there is no analysis open to fill it.
+ *
+ * Written per section rather than shared, because the reader arrived at a URL and the
+ * page should acknowledge which one. The sentences say what the section *would* show,
+ * so an empty workspace still teaches what the tool does — which the single generic
+ * line it replaced could only do for the overview.
+ */
+const NOTHING_OPEN = {
+  overview: {
+    title: "Show me where you found it.",
+    body:
+      "Pick a repository and run an analysis. Every claim on the dashboard carries the citations that " +
+      "support it, and every citation opens the artefact it was read from.",
+  },
+  architecture: {
+    title: "The map goes here.",
+    body:
+      "Every node and edge in it is a claim with at least one grounded citation behind it — nothing the " +
+      "analysis could not read is drawn. Open an analysis to fill this, or run one above.",
+  },
+  components: {
+    title: "No components to list yet.",
+    body: "Each one arrives with the files it was inferred from, so you can check the inference.",
+  },
+  flows: {
+    title: "No flows traced yet.",
+    body: "A flow is a path through the code, given step by step with the citation for each step.",
+  },
+  dependencies: {
+    title: "No dependencies read yet.",
+    body: "What the repository declares, what it actually imports, and where the two disagree.",
+  },
+  testing: {
+    title: "No test posture read yet.",
+    body: "Which frameworks are in use, what they cover, and what the analysis could not find tests for.",
+  },
+  evidence: {
+    title: "The ledger is empty.",
+    body:
+      "It fills with every artefact the analysis read and how each one reached it — reconnaissance, the " +
+      "scout, a model tool call, or the precision pass. Provenance is recorded by the harness.",
+  },
+  questions: {
+    title: "Nothing to ask yet.",
+    body:
+      "Questions are answered from one analysis's evidence, and are refused rather than guessed when that " +
+      "evidence does not cover them. Open an analysis to ask one.",
+  },
+  export: {
+    title: "Nothing to export yet.",
+    body: "A finished analysis can be taken away as JSON or as a PDF, citations included.",
+  },
+};
 
 // ---------------------------------------------------------------- overview
 
@@ -1903,6 +2086,11 @@ async function ask(textarea) {
     // Re-read the analysis so the ledger, the citation list and the questions all move
     // together. Patching the local copy would let the three drift apart.
     state.analysis = await api(`/api/analyses/${encodeURIComponent(state.analysis.id)}`);
+    // And the list, because the row carries a question count. It is the fifth thing
+    // that changes the list, and the only one that changes a summary rather than adding
+    // or removing a row — which is why it was easy to miss while `render()` was quietly
+    // re-fetching on every paint.
+    await loadAnalyses();
     toast(null);
     render();
   } catch (error) {
@@ -1959,12 +2147,41 @@ function renderExport(analysis) {
 
 // -------------------------------------------------------------------- drawer
 
+/**
+ * The evidence drawer.
+ *
+ * It is a contextual inspection surface and nothing else: it exists while a citation is
+ * open and is out of the layout entirely the rest of the time, which is what stops it
+ * being a second, empty workspace holding a third of the screen. On a wide viewport it
+ * docks beside `<main>` and the workspace reflows into what is left; below the docking
+ * width it overlays the same row. Neither form is modal — the report behind it stays
+ * readable and operable, so there is no scrim and no focus trap to escape from.
+ *
+ * `state.evidenceOpen` is the one fact the rest of the page reads: the chips derive
+ * their `aria-expanded` from it, both when they are built and when this file toggles
+ * them in place.
+ */
+
+/** Clicking the chip that is already open closes the drawer. */
+async function toggleEvidence(evidenceId) {
+  if (state.evidenceOpen === evidenceId) {
+    closeDrawer();
+    return;
+  }
+  await openEvidence(evidenceId);
+}
+
 async function openEvidence(evidenceId) {
   const drawer = $("drawer");
   // Remember where focus came from before taking it, so Escape can hand it back. A
   // keyboard user who opens a citation from a graph node has to land back on that node.
-  state.drawerReturn = document.activeElement;
+  // Only on the way in: opening a second citation from inside the drawer would otherwise
+  // record the drawer's own close button as the place to return to, and Escape would
+  // hand focus to an element it had just hidden.
+  if (drawer.hidden) state.drawerReturn = document.activeElement;
+  state.evidenceOpen = evidenceId;
   drawer.hidden = false;
+  syncEvidenceChips();
   $("drawer-eyebrow").textContent = "Evidence";
   $("drawer-title").textContent = evidenceId;
   $("drawer-close").focus();
@@ -1980,10 +2197,15 @@ async function openEvidence(evidenceId) {
       );
       state.evidence.set(evidenceId, payload);
     }
+    // The fetch is slower than a second click. Without this, closing the drawer — or
+    // opening a different citation — while one is in flight paints the stale artefact
+    // over whatever the reader actually asked for.
+    if (state.evidenceOpen !== evidenceId) return;
     clear(body);
     $("drawer-eyebrow").textContent = evidenceLocationLabel(payload);
     body.append(...evidenceDetail(payload));
   } catch (error) {
+    if (state.evidenceOpen !== evidenceId) return;
     clear(body);
     body.append(el("p", { class: "note", text: error.message }));
   }
@@ -1993,11 +2215,27 @@ function closeDrawer() {
   const drawer = $("drawer");
   if (drawer.hidden) return;
   drawer.hidden = true;
+  state.evidenceOpen = null;
+  syncEvidenceChips();
   // Focus inside a hidden element is focus nowhere: without this, Escape leaves the
   // keyboard at the top of the document and the user has to tab back to where they were.
   const returnTo = state.drawerReturn;
   state.drawerReturn = null;
   if (returnTo && typeof returnTo.focus === "function" && returnTo.isConnected) returnTo.focus();
+}
+
+/**
+ * Brings every chip on the page in line with `state.evidenceOpen`.
+ *
+ * In place rather than through `render()`, because a citation opening is not a reason to
+ * rebuild the section it was cited in: a re-render would throw away the diagram's pan and
+ * zoom, the search box's contents and the reader's scroll position, all to change one
+ * attribute on one button.
+ */
+function syncEvidenceChips() {
+  for (const chip of document.querySelectorAll("button.chip")) {
+    chip.setAttribute("aria-expanded", chip.textContent === state.evidenceOpen ? "true" : "false");
+  }
 }
 
 function evidenceDetail(payload) {

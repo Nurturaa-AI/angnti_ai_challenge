@@ -32,10 +32,18 @@ declare module "jsdom" {
     readonly outerHTML: string;
     /** Present on the form controls the test drives; absent elsewhere at runtime. */
     value: string;
+    readonly parentElement: DomElement | null;
     getAttribute(name: string): string | null;
     setAttribute(name: string, value: string): void;
     append(...nodes: (DomElement | string)[]): void;
     remove(): void;
+    focus(): void;
+    /**
+     * A bitmask. The smoke test reads bit 4 (`DOCUMENT_POSITION_FOLLOWING`) to assert
+     * the drawer comes after `<main>` in the row they share, which is what makes the
+     * flex layout put it beside the workspace rather than over it.
+     */
+    compareDocumentPosition(other: DomElement): number;
     dispatchEvent(event: DomEvent): boolean;
     querySelector(selectors: string): DomElement | null;
     querySelectorAll(selectors: string): ArrayLike<DomElement> & Iterable<DomElement>;
@@ -45,6 +53,8 @@ declare module "jsdom" {
   interface DomDocument {
     readonly body: DomElement;
     readonly documentElement: DomElement;
+    /** Where the keyboard is. The drawer's focus contract is asserted on this. */
+    readonly activeElement: DomElement | null;
     createElement(tagName: string): DomElement;
     getElementById(id: string): DomElement | null;
     querySelector(selectors: string): DomElement | null;
@@ -67,7 +77,10 @@ declare module "jsdom" {
     readonly Event: EventConstructors;
     readonly MouseEvent: EventConstructors;
     readonly KeyboardEvent: KeyboardEventConstructor;
+    /** Only `hash` is written, to drive the page's own `hashchange` routing. */
+    readonly location: { hash: string };
     addEventListener(type: string, listener: (event: never) => void): void;
+    dispatchEvent(event: DomEvent): boolean;
     close(): void;
   }
 

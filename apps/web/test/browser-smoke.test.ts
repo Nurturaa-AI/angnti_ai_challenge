@@ -420,6 +420,32 @@ describe("analysing a repository from the browser", () => {
     expect($("recent")?.textContent ?? "").toContain("widget");
   });
 
+  it("arms the delete confirmation on Cancel, not on the destructive button", async () => {
+    // The keypress this protects against: arming replaces the button the user just
+    // activated, so whatever is focused afterwards is what an Enter already on its way
+    // down will fire. When that was "Delete for good", the confirmation step guarded
+    // nothing — and this runs the real handler rather than reading the source, so it
+    // fails if the focus call is present but finds nothing to focus.
+    const del = $("recent")?.querySelector(".analysis-delete");
+    expect(del).not.toBeNull();
+    del?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    await until("the row to arm", () => $("recent")?.querySelector(".analysis-confirm") !== null);
+
+    const cancel = $("recent")?.querySelector(".analysis-cancel");
+    const confirm = $("recent")?.querySelector(".analysis-confirm");
+    expect(cancel).not.toBeNull();
+    expect(confirm).not.toBeNull();
+    expect(doc().activeElement).toBe(cancel);
+    expect(doc().activeElement).not.toBe(confirm);
+
+    // And out again, leaving the row exactly as it was: this test must not delete the
+    // analysis the rest of the suite is reading.
+    cancel?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    await until("the row to disarm", () => $("recent")?.querySelector(".analysis-confirm") === null);
+    expect($("recent")?.querySelector(".analysis-delete")).not.toBeNull();
+    expect(pageErrors).toEqual([]);
+  });
+
   it("opens an evidence artefact in the drawer, and Escape closes it", async () => {
     // Asserted rather than skipped. The provider is the deterministic mock, so the
     // report it produces either cites artefacts or it does not; a suite that quietly
@@ -428,14 +454,74 @@ describe("analysing a repository from the browser", () => {
     const chip = doc().querySelector("button.chip");
     expect(chip).not.toBeNull();
 
+    // Closed to begin with — and closed as the chip describes it, not only as the
+    // attribute does. `aria-expanded` is the fact a screen reader is given, and the two
+    // must not be able to disagree.
+    expect($("drawer")?.getAttribute("hidden")).not.toBeNull();
+    expect(chip?.getAttribute("aria-expanded")).toBe("false");
+    expect(chip?.getAttribute("aria-controls")).toBe("drawer");
+
     chip?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
     await until("the drawer to open", () => $("drawer")?.getAttribute("hidden") === null);
     // What the drawer opened on has to be the artefact, not an empty shell.
     expect($("drawer-body")?.textContent ?? "").not.toBe("");
+    expect(chip?.getAttribute("aria-expanded")).toBe("true");
 
     doc().dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await until("the drawer to close", () => $("drawer")?.getAttribute("hidden") !== null);
+    expect(chip?.getAttribute("aria-expanded")).toBe("false");
     expect(pageErrors).toEqual([]);
+  });
+
+  it("closes the drawer from the chip that opened it", async () => {
+    // A disclosure control that only discloses is half a control, and on a docked drawer
+    // it is the half that matters: the reader who opened a citation from the middle of a
+    // report wants the workspace back, and the button they used is the one under their
+    // pointer.
+    const chip = doc().querySelector("button.chip");
+    chip?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    await until("the drawer to open", () => $("drawer")?.getAttribute("hidden") === null);
+
+    chip?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    await until("the drawer to close again", () => $("drawer")?.getAttribute("hidden") !== null);
+    expect(chip?.getAttribute("aria-expanded")).toBe("false");
+    expect(pageErrors).toEqual([]);
+  });
+
+  it("hands focus back to the citation when the drawer closes", async () => {
+    // The keyboard contract for a non-modal surface: focus goes in when it opens and
+    // comes back to where it came from when it shuts. Without the second half, Escape
+    // leaves focus inside a hidden element — which is focus nowhere — and a keyboard
+    // user has to tab in from the top of the document to get back to the report.
+    const chip = doc().querySelector("button.chip");
+    (chip as unknown as { focus: () => void }).focus();
+    chip?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    await until("the drawer to open", () => $("drawer")?.getAttribute("hidden") === null);
+    expect(doc().activeElement).toBe($("drawer-close"));
+
+    $("drawer-close")?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    await until("the drawer to close", () => $("drawer")?.getAttribute("hidden") !== null);
+    expect(doc().activeElement).toBe(chip);
+    expect(pageErrors).toEqual([]);
+  });
+
+  it("shares the row with the workspace rather than floating over it", () => {
+    // jsdom has no layout engine, so this is a check on the document's shape, which is
+    // what decides the layout: a drawer inside `.layout`, after `<main>`, is a sibling
+    // the flex row makes room for. The version this replaced was a `position: fixed`
+    // panel outside the row that covered the workspace and the top bar both, and no
+    // assertion available here could tell the difference except this one.
+    const drawer = $("drawer");
+    const main = $("main");
+    expect(drawer).not.toBeNull();
+    expect(main).not.toBeNull();
+    if (drawer === null || main === null) return;
+    expect(drawer.parentElement?.className).toBe("layout");
+    expect(main.parentElement).toBe(drawer.parentElement);
+    // Bit 4 is `DOCUMENT_POSITION_FOLLOWING`: the drawer comes after `<main>` in the
+    // row they share, which is the order the flex layout reads to put it beside the
+    // workspace rather than before it.
+    expect(main.compareDocumentPosition(drawer) & 4).toBeTruthy();
   });
 
   it("keeps a live region for the things a screen reader needs told", () => {
@@ -445,6 +531,23 @@ describe("analysing a repository from the browser", () => {
     const announce = $("announce");
     expect(announce).not.toBeNull();
     expect(announce?.getAttribute("aria-live")).toBeTruthy();
+  });
+
+  it("fills the architecture workspace rather than showing an empty landing page", async () => {
+    // The primary workspace, reached the way a reader reaches it. `#architecture` used
+    // to answer with the overview's landing copy whenever nothing was open, so the view
+    // the product is named for was the one view that never showed anything.
+    dom.window.location.hash = "architecture";
+    dom.window.dispatchEvent(new dom.window.Event("hashchange"));
+    await until("the architecture section to render", () => text().includes("nodes,"));
+
+    const main = $("main")?.textContent ?? "";
+    expect(main).toContain("Architecture");
+    // The graph's own summary line, written by `renderArchitecture` from the stored
+    // record: a landing page cannot produce it.
+    expect(main).toMatch(/\d+ nodes, \d+ edges/);
+    expect(main).not.toContain("Show me where you found it");
+    expect(pageErrors).toEqual([]);
   });
 });
 
