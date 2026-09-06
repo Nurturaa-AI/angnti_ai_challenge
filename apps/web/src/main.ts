@@ -295,14 +295,41 @@ async function main(argv: readonly string[]): Promise<number> {
     ].join("\n"),
   );
 
+  /**
+   * Ordered shutdown, and the reason the order is what it is.
+   *
+   * The server closes first: it stops accepting connections immediately, and `close()`
+   * resolves once the ones already open have finished. Only then does the store close,
+   * because a store closed underneath an in-flight write turns a clean shutdown into a
+   * `StorageError` in a log — a request that was about to succeed instead reports a
+   * database failure, which is a lie about what happened.
+   *
+   * A close that fails is reported and exits non-zero. Silently exiting 0 after failing
+   * to close a database is the shape of bug that a supervisor reads as "stopped cleanly"
+   * and restarts into a recovering WAL. The failure is printed through `formatError`
+   * rather than as a rejection, both because a stack trace on Ctrl-C is noise and because
+   * `formatError` is where redaction lives.
+   *
+   * `once` per signal, and `stopping` besides. `once` is deliberate and is what makes a
+   * second Ctrl-C work the way Ctrl-C is supposed to: the handler has already been removed,
+   * so the second signal reaches Node's default disposition and the process dies at 130
+   * without draining. A user who presses it twice has asked for that. `stopping` covers the
+   * mixed case — SIGINT then SIGTERM — where a second handler is still registered and
+   * would otherwise call `close()` on an already-closing server.
+   */
+  let stopping = false;
   const stop = (): void => {
-    // Close the server first: an in-flight request may still be writing, and a store
-    // closed underneath it would turn a clean shutdown into a `StorageError` in a log.
+    if (stopping) return;
+    stopping = true;
     void running
       .close()
       .then(() => store.close())
       .then(() => {
         process.exitCode = 0;
+      })
+      .catch((error: unknown) => {
+        process.stderr.write(`\nShutdown did not complete cleanly: ${formatError(error)}\n`);
+        process.exitCode = 1;
       });
   };
   process.once("SIGINT", stop);

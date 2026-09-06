@@ -20,8 +20,23 @@ evaluation/results/*
 !trajectories/.gitkeep
 !evaluation/results/.gitkeep
 
+# Runtime databases. The web server's analysis store defaults to
+# ~/.repo-archaeologist/analyses.db and `resolveDatabaseLocation` refuses a database
+# inside the workspace, so the default case cannot land one here — but `--db ./local.db`
+# is accepted, and WAL and shared-memory sidecars would appear beside it.
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*-wal
+*-shm
+
 # Build / tooling artefacts
 *.tsbuildinfo
 coverage/
 *.log
+*.pid
 .DS_Store
+.idea/
+.vscode/
+*.swp

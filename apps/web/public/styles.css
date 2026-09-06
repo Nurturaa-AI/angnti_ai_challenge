@@ -181,6 +181,17 @@ textarea {
   min-width: 0;
 }
 
+/*
+ * Where the keyboard is.
+ *
+ * `a` belongs in this list and was missing from it. The section navigation is nine
+ * anchors — `renderNav()` is the only place in `app.js` that emits one, and they are the
+ * only route to eight of the nine sections — so a keyboard user tabbing through the
+ * sidebar had nothing but the user-agent default outline, which on this ground is close
+ * to invisible. `.skip-link` is an anchor too, and its own `:focus` rule that moves it
+ * on screen still applies; this adds the ring it also needs.
+ */
+a:focus-visible,
 input:focus,
 select:focus,
 textarea:focus,
@@ -1507,7 +1518,61 @@ main:focus {
  * repaint from the render loop.
  */
 @media (max-width: 860px) {
+  /*
+   * The sidebar becomes a horizontal strip rather than disappearing.
+   *
+   * `display: none` here was a real defect: `.nav` is the *only* way to reach eight of
+   * the nine sections — `renderNav()` is the single place in `app.js` that emits a
+   * `href: "#<section>"` — so hiding it left a narrow viewport able to see Overview and
+   * nothing else, with Architecture, Evidence, Questions and Export reachable only by
+   * typing a fragment into the address bar.
+   *
+   * The strip is CSS only: same markup, same `renderNav()`, same `.on` active class,
+   * same anchors. `.layout` is a row, so turning the sidebar into a full-width block
+   * requires wrapping it, which is what `flex-wrap` on `.layout` does below.
+   */
+  .layout {
+    flex-wrap: wrap;
+  }
+
   .sidebar {
+    width: 100%;
+    flex: 1 0 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+    padding: 8px 0 0;
+    overflow-y: visible;
+    gap: 8px;
+  }
+
+  .nav {
+    display: flex;
+    gap: 2px;
+    /* The one place sideways scrolling is correct: a strip of tabs that does not fit. */
+    overflow-x: auto;
+    padding: 0 12px 2px;
+    scrollbar-width: thin;
+  }
+
+  .nav a {
+    border-left: none;
+    border-bottom: 2px solid transparent;
+    padding: 6px 10px;
+    white-space: nowrap;
+  }
+
+  .nav a.on {
+    border-left-color: transparent;
+    border-bottom-color: var(--accent);
+  }
+
+  /*
+   * Recent analyses and the persistence note are reference material, not navigation.
+   * On a strip they would push the workspace off the screen, and unlike the section
+   * links nothing else in the product depends on reaching them.
+   */
+  .recent,
+  .sidebar-note {
     display: none;
   }
 
