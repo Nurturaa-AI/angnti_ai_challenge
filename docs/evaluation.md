@@ -581,6 +581,63 @@ tokens). The full hypothesis — written before the code, so the result could be
 rationalised — and the per-case table are in the
 [improvement changelog](improvement-changelog.md).
 
+### Iteration 8 — the constraint was the shape of the data, not the prose
+
+Iteration 7's rejected entry contained the next hypothesis. It recorded that three failures were out of
+reach of *any* prompt because `selectClaims` emits one claim per array entry, so no dependency claim can
+hold two dependency names. That is a statement about representation, made while testing instructions.
+Iteration 8 changed the representation and left the prompt alone.
+
+One variable changed: the advanced response contract. After schema validation and before precision and
+grounding, the pipeline projects the validated body into atomic claims addressed to an evidence ledger,
+composes claims that are structurally about one thing, and appends the compositions into the body's own
+arrays as ordinary marked entries. No model call was added, the synthesis prompt is byte-identical to
+Iteration 7's reverted control, and `packages/evaluator` is untouched.
+
+| | Regression Set v1 (frozen) | Challenge Set v2 | Combined |
+| --- | --- | --- | --- |
+| Control run | `eval-advanced-2026-09-05T01-35-25Z` | same run | same run |
+| Treatment run | `eval-advanced-2026-09-06T11-28-46Z` | same run | same run |
+| **Evidence-backed accuracy** | **100.0 % → 100.0 %** | **29.2 % (7/24) → 37.5 % (9/24)** | **55.3 % → 60.5 %** |
+| Answer accuracy | 100.0 % → 100.0 % | 41.7 % (10/24) → 41.7 % (10/24) | 63.2 % → 63.2 % |
+| Unsupported answers | 0 → 0 | 3 → 1 | 3 → 1 |
+| Fabrications / dropped citations | 0 / 0 → 0 / 0 | 0 / 0 → 0 / 0 | 0 / 0 → 0 / 0 |
+| Mean evidence relevance | 0.4105 → 0.4387 | 0.3809 → 0.4052 | 0.4007 → 0.4256 |
+
+Provenance `iteration-6-baseline` → `iteration-8-atomic-claims-experiment`; `systemVersion` 0.1.0 →
+0.2.0, because this treatment shipped. The acceptance threshold was again **+8 pp** on Challenge
+evidence-backed accuracy. The measurement is **+8.3 pp**. The treatment is **kept**.
+
+**Exactly two questions of 38 changed outcome, both upward.** `challenge-v2-orders-q11` and
+`challenge-v2-pyflow-q12` each went UNCITED → BACKED with `matchedIn = dependencies` and `content`
+evidence strength — the two cases the hypothesis named in advance as the only ones reachable. Nothing
+regressed. Of the groupings, only `configuration-dependency` moved (2/5 → 4/5); `documentation`-kind
+questions went 12/15 → 14/15 with `source` and `mixed` flat; `hard` questions stayed at 4/12.
+
+**The result equals its own measured ceiling, which is the honest way to read it.** Before implementing,
+the 17 challenge failures were re-classified by asking of each not just "did one claim satisfy this"
+but "do the required keywords appear anywhere in the briefing at all". Fourteen fail the second test —
+no arrangement of claims can recover them. Of the three that pass it, `orders-q05` was excluded as a
+keyword coincidence: its only satisfied alternative is the bare word `all`, in an unrelated
+authentication claim, while `rollback`, `begin` and `atomic` appear nowhere. That put the ceiling at
+9 of 24 — 37.5 %, the threshold exactly — and the treatment reached precisely it. So the mechanism
+recovered everything available to it and has no headroom left. `orders-q05` remains the benchmark's one
+correct-but-uncited question, left alone deliberately.
+
+**What the positive result establishes, and what it does not.** When a metric is bounded by the *shape*
+of the structure a downstream consumer reads, instructing the producer to write better prose cannot move
+it; changing the structure can, and did, on the first attempt. The diagnostic that distinguishes the two
+situations is whether the required facts are present in the output but never in the same claim. What is
+*not* established is the cross-file half of the mechanism: both recovered cases came from the same-list
+rule over a dependency manifest. The shared-subject rule fired on every analysis and produced
+compositions citing four or five distinct files each, and moved no question — implemented, tested, live,
+and unvalidated by this benchmark.
+
+Cost: $0.066076, byte-identical to the control, because the claim pass adds no model call. The claim
+pass itself runs in 5–22 ms per analysis. Full hypothesis, per-case tables and the offline replay that
+predicted the outcome before the run are in the
+[improvement changelog](improvement-changelog.md).
+
 <a name="limitations"></a>
 ## Limitations
 

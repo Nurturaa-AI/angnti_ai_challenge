@@ -266,6 +266,30 @@ export const PrecisionSummarySchema = z.object({
 });
 export type PrecisionSummaryRecord = z.infer<typeof PrecisionSummarySchema>;
 
+/**
+ * What the atomic-claim pass did.
+ *
+ * Reported so a run can be read for the *mechanism* rather than only for the
+ * score: how many assertions the briefing was decomposed into, how many of them
+ * were composed into multi-source claims, how many of those reached the briefing,
+ * and whether every claim's evidence address resolved.
+ */
+export const ClaimSummarySchema = z.object({
+  /** One per assertion the briefing already made. */
+  atomicClaims: z.number().int().min(0),
+  /** Compositions built over those claims. */
+  composedClaims: z.number().int().min(0),
+  /** Compositions that became entries in the briefing. */
+  materialized: z.number().int().min(0),
+  /** Claims left with no evidence. Reported, not hidden. */
+  unsupportedClaims: z.number().int().min(0),
+  /** False when any claim's evidence address failed to resolve. */
+  integrityOk: z.boolean(),
+  /** Distinct sources cited by composed claims, for auditing what composition carried. */
+  composedSources: z.array(z.string()).default([]),
+});
+export type ClaimSummaryRecord = z.infer<typeof ClaimSummarySchema>;
+
 export const ExplorationSummarySchema = z.object({
   /** Model round trips, including the final synthesis call. */
   turns: z.number().int().min(0),
@@ -286,6 +310,8 @@ export const ExplorationSummarySchema = z.object({
   scout: ScoutSummarySchema.optional(),
   /** Present only when the evidence precision pass ran after synthesis. */
   precision: PrecisionSummarySchema.optional(),
+  /** Present only when the atomic-claim pass ran after validation. */
+  claims: ClaimSummarySchema.optional(),
 });
 export type ExplorationSummary = z.infer<typeof ExplorationSummarySchema>;
 

@@ -72,6 +72,7 @@ Everything both sides must agree on, and nothing else.
 | [`grounding.ts`](../packages/shared/src/grounding.ts) | Verifies citations against the supplied context. The fabrication defence. |
 | [`tools/`](../packages/shared/src/tools/) | The three read-only tools, the repository boundary, and the dispatcher. |
 | [`scout/`](../packages/shared/src/scout/) | The Evidence Scout: term extraction, lexicon, candidate ranking, the search-and-read phase. No model call. |
+| [`claims/`](../packages/shared/src/claims/) | Atomic claims addressed to an evidence ledger, structural composition, integrity checking, materialization. No model call. |
 | [`json.ts`](../packages/shared/src/json.ts) | Extracts JSON from whatever the model actually returned; validates against a schema. |
 | [`llm.ts`](../packages/shared/src/llm.ts) | The `LlmClient` interface and the Gemini implementation. |
 | [`mock-llm.ts`](../packages/shared/src/mock-llm.ts) | An offline, deterministic, zero-cost provider. |
@@ -203,7 +204,8 @@ claim that it could not back up?" — and get a number.
 
 [`runAdvanced`](../advanced/src/index.ts) keeps the baseline's five steps and inserts two things
 between step 2 and step 3: a deterministic **Evidence Scout**, then a bounded exploration loop.
-Iteration 3 added one more deterministic step, after the model has spoken and before grounding.
+Iteration 3 added one more deterministic step, after the model has spoken and before grounding;
+Iteration 8 added a second one beside it.
 
 ```
 collect-context ─► scout-search ─► scout-read ─► build-recon-prompt
@@ -216,14 +218,16 @@ collect-context ─► scout-search ─► scout-read ─► build-recon-prompt
                                                                   │
                                               validate-schema ◄───┘
                                                      │
+                                              compose-claims    (Iteration 8: atomic claims
+                                                     │           + composition, no model)
                                               refine-evidence   (Iteration 3: hygiene
                                                      │           + corroboration, no model)
                                               ground-evidence
 ```
 
-The order of the last two is load-bearing and pinned by a test: corroboration adds citations, and
-grounding is what verifies them, so reversing the pair would let an unverified excerpt reach the
-briefing.
+The order of the last three is load-bearing and pinned by a test: composition adds claims,
+corroboration adds citations, and grounding is what verifies them, so moving grounding earlier
+would let an unverified excerpt reach the briefing.
 
 ### The Evidence Scout (Iteration 2)
 
@@ -337,6 +341,53 @@ excludes.
 
 `search_code` matches literal, case-insensitive substrings. No regex — which keeps it
 deterministic and makes a catastrophic-backtracking input impossible.
+
+### Atomic claims and composition (Iteration 8)
+
+The response contract at 0.2.0 has a level below "the briefing": a **claim set**, projected from the
+validated body with no model call.
+
+```ts
+interface AtomicClaim   { id: string; kind: ClaimKind; text: string; evidenceIds: string[]; subject?: string }
+interface ComposedClaim extends AtomicClaim { claimIds: string[] }
+interface ClaimSet      { evidence: Record<string, Evidence>; claims: AtomicClaim[]; composed: ComposedClaim[] }
+```
+
+A claim addresses evidence **by id** into the set's own ledger and never carries a copy, so there is
+exactly one place a citation can come from and no way for a claim to acquire evidence its parts did not
+have. Ids are `sha256` over kind, text and sorted evidence ids — content-derived, so identical for
+identical content and carrying no timestamp, case id or evaluator metadata.
+
+Two composition rules, both **structural and question-blind**. The claim pass cannot see a question:
+`composeClaimSet` takes one parameter, and [a test](../packages/shared/test/claims.test.ts) asserts its
+arity so no channel for one can be added quietly.
+
+| Rule | Groups | Because |
+| --- | --- | --- |
+| Same-list | Claims of one kind citing one artefact | The manifest lists dependencies; each claim names one; the composition names the set |
+| Shared-subject | Claims of different kinds whose texts name each other's subjects | A cross-reference the model wrote itself: one mechanism seen from two sides, citing both files |
+
+Both are capped — 8 compositions, 6 parts for cross-kind, 2 000 characters — because a composition of
+everything is a paragraph, not a claim, and would make every keyword in the briefing co-occur in one
+text regardless of what was established. A **list** composition is all-or-nothing and an over-long one
+is dropped rather than trimmed: "taken together, these are the entries" is false if an entry was dropped
+to fit a cap. A composed claim's text is its parts' own texts joined behind a `Taken together (kind):`
+lead-in, so it asserts exactly what its parts assert and cannot claim more than the briefing did.
+
+`checkClaimIntegrity` rejects unknown evidence ids, duplicate claim ids, orphaned compositions and
+evidence escape. A claim with **no** evidence is reported as unsupported rather than treated as a
+structural failure — that is a briefing-quality fact, and the audit already counts it.
+
+Then `materializeComposedClaims` appends each composition into the body's own `components` / `flows` /
+`dependencies` / `risks` array, marked `Composite:`, carrying only its parts' evidence. That is the
+load-bearing choice. Because a composition lands in a list the rest of the system already walks,
+grounding, precision, the audit, the report, the PDF, the graph and the evaluator's `selectClaims` all
+need no change — a composed entry is an ordinary entry to every one of them, and in particular it faces
+the same citation verification as everything else. `testing` and `overview` compositions are skipped:
+neither is an appendable list, and rewriting the model's prose is not this step's job.
+
+`meta.exploration.claims` reports counts and cited **source ids** only. Internal claim-evidence
+addressing never leaves the process.
 
 ### The exploration budget
 
@@ -463,6 +514,24 @@ nineteen questions of it. A prompt cannot instruct a writer to organise a paragr
 question that is not in the prompt — and the alternative, passing evaluation questions into
 synthesis, would measure a different system. Iteration 6's "the evidence was in context" turns out
 to be a much weaker claim than "the model had established the fact".
+
+**Iteration 8 took the constraint Iteration 7's rejection had identified, and is kept.** Iteration 7's
+own entry recorded that three failures were out of reach of any prompt because `selectClaims` emits one
+claim per array entry — a statement about *representation*, made while testing instructions. Iteration 8
+changed the representation instead: [atomic claims and composition](#atomic-claims-and-composition-iteration-8),
+one deterministic step, no model call, prompt byte-identical to the control. Challenge evidence-backed
+accuracy went 29.2 % → **37.5 %** against the same +8 pp threshold; exactly two questions of 38 changed
+outcome, both UNCITED → BACKED, and both the ones the hypothesis named in advance. Regression stayed at
+100 %, fabrications at 0, cost identical to the control. `ADVANCED_VERSION` moved to 0.2.0.
+
+Two caveats belong beside that number. It **equals the ceiling** measured before the run — 9 of 24 was
+the maximum composition alone could reach, so the mechanism recovered everything available to it and has
+no headroom left. And both recovered cases came from the same-list rule over a dependency manifest: the
+cross-file shared-subject rule fires on every analysis, produces compositions citing four or five files
+each, and moved no question. The general lesson is the transferable part — when a metric is bounded by
+the *shape* of the structure a downstream consumer reads, instructing the producer to write better prose
+cannot move it, and the diagnostic that tells you which situation you are in is whether the required
+facts are present in the output but never in the same claim.
 
 Full numbers, the regressions, and the reason mean evidence relevance moved the wrong way twice
 are in [`improvement-changelog.md`](improvement-changelog.md).
