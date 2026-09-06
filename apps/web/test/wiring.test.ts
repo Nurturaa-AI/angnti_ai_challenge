@@ -350,6 +350,87 @@ describe("the empty state has one implementation", () => {
   });
 });
 
+/**
+ * The navigation survives a narrow viewport, and the keyboard can see itself.
+ *
+ * Two defects found in the release pass, both invisible to every other gate here: jsdom
+ * applies no stylesheet, so a rule that hides the only navigation in the product passes
+ * every DOM assertion in this file and in `browser-smoke.test.ts`. Both are asserted as
+ * stylesheet text, which is what this suite is for.
+ *
+ *   1. `@media (max-width: 860px) { .sidebar { display: none } }`. `renderNav()` is the
+ *      single place in `app.js` that emits a `href: "#<section>"`, and `.nav` is the only
+ *      route to eight of the nine sections. Hiding it left a narrow viewport on Overview
+ *      with no way to reach Architecture, Evidence, Questions or Export short of typing a
+ *      fragment into the address bar.
+ *   2. No `a` in the focus ring list. The section links are anchors; `button:focus-visible`
+ *      and `input:focus` do not cover them, so tabbing through the navigation showed only
+ *      the user-agent default outline, which on this ground is close to invisible.
+ */
+describe("the narrow layout keeps the product reachable", () => {
+  const narrowBlock = ((): string => {
+    const at = stylesCss.indexOf("@media (max-width: 860px)");
+    expect(at, "the small-viewport breakpoint should exist").toBeGreaterThan(-1);
+    const rest = stylesCss.slice(at);
+    // To the closing brace of the at-rule, counting depth rather than guessing.
+    let depth = 0;
+    for (let index = rest.indexOf("{"); index < rest.length; index += 1) {
+      if (rest[index] === "{") depth += 1;
+      else if (rest[index] === "}") {
+        depth -= 1;
+        if (depth === 0) return rest.slice(0, index + 1);
+      }
+    }
+    return rest;
+  })();
+
+  /**
+   * The check that matters: not "is there a rule" but "can the reader still get there".
+   * `.sidebar { display: none }` inside the breakpoint is the exact defect, and the
+   * regex is written to catch it however it is spelled.
+   */
+  it("does not hide the only navigation the product has", () => {
+    const sidebarRules = [...narrowBlock.matchAll(/\.sidebar\s*\{([^}]*)\}/g)].map((match) => match[1] ?? "");
+    expect(sidebarRules.length).toBeGreaterThan(0);
+    for (const body of sidebarRules) {
+      expect(body.replace(/\s+/g, " ")).not.toMatch(/display\s*:\s*none/);
+    }
+  });
+
+  /** And it is still navigation: the links are laid out, not merely left in the flow. */
+  it("lays the section links out as a strip that can scroll sideways", () => {
+    const nav = /\.nav\s*\{([^}]*)\}/.exec(narrowBlock)?.[1] ?? "";
+    expect(nav.replace(/\s+/g, " ")).toMatch(/display\s*:\s*flex/);
+    expect(nav.replace(/\s+/g, " ")).toMatch(/overflow-x\s*:\s*auto/);
+  });
+
+  /**
+   * Recent analyses and the persistence note may go: they are reference material, and
+   * nothing else in the product depends on reaching them. Asserted so the distinction is
+   * deliberate rather than an accident of which rule was written last.
+   */
+  it("drops the reference material rather than the navigation", () => {
+    expect(narrowBlock).toMatch(/\.recent,\s*\n?\s*\.sidebar-note\s*\{[^}]*display\s*:\s*none/);
+  });
+
+  it("gives a focused link the same ring as a focused button", () => {
+    // The selector list of whichever rule draws the focus ring. Comments in this
+    // stylesheet quote CSS, so they are stripped before the prelude is read back — the
+    // note above this very rule names both selectors and would otherwise satisfy it.
+    const source = stylesCss.replace(/\/\*[\s\S]*?\*\//g, "");
+    const declaration = source.indexOf("outline: 2px solid var(--accent-dim)");
+    expect(declaration, "a focus-ring rule should exist").toBeGreaterThan(-1);
+    const opening = source.lastIndexOf("{", declaration);
+    const previous = Math.max(source.lastIndexOf("}", opening), source.lastIndexOf(";", opening));
+    const subjects = source
+      .slice(previous + 1, opening)
+      .split(",")
+      .map((part) => part.trim());
+    expect(subjects).toContain("a:focus-visible");
+    expect(subjects).toContain("button:focus-visible");
+  });
+});
+
 describe("the destructive control is not the default one", () => {
   const armed = appJs.slice(appJs.indexOf("function deleteControl("), appJs.indexOf("async function deleteAnalysis("));
 
