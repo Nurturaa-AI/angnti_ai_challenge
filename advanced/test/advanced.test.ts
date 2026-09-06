@@ -565,9 +565,16 @@ describe("runAdvanced — the trajectory", () => {
       "build-synthesis-prompt",
       "synthesis-call",
       "validate-schema",
+      "compose-claims",
       "refine-evidence",
       "ground-evidence",
     ]);
+    // Claim composition sits between validation and precision by design: it needs a
+    // schema-valid briefing to decompose, and precision and grounding must both run
+    // over the composed entries rather than before them, so a composition's
+    // citations face the same verification as every other citation.
+    expect(actions.indexOf("validate-schema")).toBeLessThan(actions.indexOf("compose-claims"));
+    expect(actions.indexOf("compose-claims")).toBeLessThan(actions.indexOf("ground-evidence"));
     // The ordering is the point of iteration 2, not an accident of this list: the
     // deterministic search runs to completion before the model gets a turn, so the
     // model is reasoning about evidence rather than about which filename to guess.

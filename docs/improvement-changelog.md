@@ -1661,3 +1661,321 @@ a question. That instruction had no referent and its only measured effect was to
 **Cost of the negative result.** $0.069218 for the treatment run. Two runs of the 38-question
 benchmark now exist at a combined $0.135294, and the second one bought a rejected hypothesis and a
 sharper reading of the first — which is what the benchmark headroom was built for.
+
+## Iteration 8 — Schema-Level Atomic Claims & Evidence Composition
+
+*A new experiment, not a continuation of Iteration 7. Iteration 7 changed the synthesis prompt and was
+reverted; this iteration changes the advanced response contract — the schema the model fills and the
+structures grounding walks. It shares Iteration 7's control measurement and nothing else, so it makes
+no claim of one-variable continuity with it. Hypothesis recorded before any code was written.*
+
+### Hypothesis
+
+**Observation.** The control is Iteration 6, `eval-advanced-2026-09-05T01-35-25Z.json`, provenance
+`iteration-6-baseline`: 100.0 % evidence-backed on Regression Set v1 (14 of 14) against 29.2 % on
+Challenge Set v2 (7 of 24), 0 fabrications, 0 dropped citations, 0 unsupported briefing claims.
+Iteration 7 measured 25.0 % on the same benchmark and was rejected. **29.2 % is the baseline this
+iteration is measured against; 25.0 % is not.**
+
+**Failure pattern.** The 17 challenge failures were re-classified for this iteration by replaying
+`selectClaims` and `satisfiesKeywords` over the two control briefings, asking of each failure not
+only "did any single claim satisfy the requirement" but "do the required keywords appear *anywhere in
+the whole briefing*". The answer separates the failures cleanly:
+
+- **14 of 17 — the content is absent from the entire briefing** (`wholeDoc = false`). No arrangement
+  of claims can recover these. They need `4000`, `database_url`, `kafka_brokers`, `mypy`, `insert`,
+  `failed` and their like to be *written at all*, which is what Iteration 7 tried by prompt and
+  failed to achieve.
+- **3 of 17 — cross-claim dispersal** (`orders-q05`, `orders-q11`, `pyflow-q12`). Every required
+  keyword is present in the briefing, and no single claim carries them all. These are the three the
+  control already scores correct-but-uncited: the answer is right and the evidence cannot be credited.
+
+**One of those three is not real, and finding that out lowered the ceiling before the run.** Reading
+`orders-q05` claim by claim rather than in aggregate: its only satisfied alternative group is the bare
+word `all`, and the `all` in that briefing is *"verifies bearer tokens against JWT_SECRET on all
+routes except /health"* — an authentication claim with no bearing on transactional atomicity.
+`rollback`, `begin`, `or none of them` and `atomic` appear nowhere in the briefing at all. So
+`orders-q05`'s aggregate "correct" is a keyword coincidence across unrelated claims, not a dispersed
+right answer, and composing toward it would be building a mechanism to exploit an accident. The rule
+leaves it alone deliberately. **The reachable set is therefore 2, not 3, and the ceiling is 9 of 24 —
+37.5 %, which is the acceptance threshold exactly rather than comfortably above it.**
+
+**Hypothesis.** For those three, the constraint is representational, not informational. The briefing
+holds the facts and the citations; the response contract has no structure in which a fact resting on
+two files, or on two entries of one list, exists as *one* claim with *both* citations. Give the model
+a place to compose one, and the composition — not new retrieval, not new prose — makes the evidence
+creditable.
+
+**Mechanism.** `selectClaims` emits one claim per array entry and joins that entry's own fields into
+the claim text. So a dependency claim is one dependency; a component claim is one component. A
+question whose answer spans two dependencies (`click` plus one of `rich`/`sqlalchemy`/`pyyaml`) or two
+files (`src/lib/db.js` implements BEGIN/COMMIT/ROLLBACK, `src/services/inventory.js` says "for every
+line, or none of them") has no claim that can satisfy it, no matter how well the model writes. A
+composed claim — one text, several cited sources — is exactly the missing shape, and it must land
+somewhere `selectClaims` already projects, because the evaluator is frozen and correctly so.
+
+**Where the mechanism is weakest, stated now rather than after the numbers.** Three things, in
+descending order of how likely they are to decide the result.
+
+1. **The ceiling is 37.5 %, measured, not estimated — and it is the threshold itself.** 7 backed now,
+   at most 9 of 24 reachable by composition alone once `orders-q05` is excluded as a coincidence. So
+   the treatment must recover *both* remaining cases and lose nothing anywhere, to land exactly on
+   the acceptance line. There is no margin at all, and a single regression puts it under.
+2. **Composition is necessary but not sufficient.** Each recovered claim must also reach `content`
+   evidence strength against the expected locations — `package.json` for `orders-q11`,
+   `pyproject.toml` for `pyflow-q12`, both of `src/lib/db.js` and `src/services/inventory.js` for
+   `orders-q05`. A composed claim citing the tree instead of the manifest recovers nothing.
+3. **A schema field is an invitation, not a guarantee.** The model may leave the new structure empty,
+   or fill it with restatements of prose it already wrote. Iteration 7's lesson applies directly: a
+   mechanism can be confirmed at the token level and still not move the metric.
+
+**Expected metric movement.** Challenge evidence-backed rises from 29.2 % to 37.5 %; the movement
+appears in `orders-q11` and `pyflow-q12` specifically and in no others, since no others are reachable.
+Regression Set v1 holds at 100.0 %. Fabrications hold at 0. Unsupported
+claims and dropped citations do not rise. Answer accuracy is expected to be flat — these three
+questions are *already* answered correctly, so this iteration converts UNCITED to BACKED and should
+not change what the system knows.
+
+**Falsification.** The hypothesis is wrong if compositions are built and correctly cited and the two
+reachable cases still do not score BACKED — that would put the constraint somewhere other than the
+representation. It is wrong, differently, if the metric rises while `orders-q11` and `pyflow-q12` stay
+UNCITED: aggregate movement without the named mechanism in the named cases is not validation, and will
+be reported as such rather than claimed as a win. And it fails regardless of the primary metric if
+fabrications or unsupported claims rise, or if Regression drops below 100 %.
+
+**Offline replay, before spending a run.** The claim pass was replayed over the two control briefings
+already on disk and re-scored with the unmodified evaluator (`scripts/diagnose-claim-composition.ts`).
+It calls no model and passes no benchmark data into the claim pass — the questions enter only in the
+scorer, afterwards. Result: `orders-q11` and `pyflow-q12` both move UNCITED → BACKED via
+`matchedIn=dependencies`, nothing regresses on either challenge case, and the two Regression cases
+move nothing in either direction. Integrity is clean on all four, with 0 unsupported claims. So the
+mechanism is capable of the two cases on the control's *own* output. What the replay cannot tell us is
+whether a live run reproduces the same briefings — same model, same seed, but a different day — which
+is the whole reason the real number still has to be measured.
+
+**Acceptance.** Challenge 29.2 % → 37.5 % or better, with Regression 100 % → 100 % and fabrications
+0 → 0. A result in the 25–30 % band is evidence against claim representation as the bottleneck and
+points instead at the question-shaped answering path as the next architectural direction.
+
+**Risk.** The contract change is wider than Iteration 7's prompt change and touches more surfaces:
+the schema, grounding, precision, the mock provider, the report layer, the Q&A stub. Each is a place
+an existing passing test can break, and none of them may be fixed by weakening an assertion. Adding a
+structure the model can fill with unverified text is also the second time in two iterations this
+system has invited more specificity, and fabrications have been 0 on every run ever made — that is
+still the thing most worth not losing.
+
+### The change
+
+Five new modules under `packages/shared/src/claims/`, one new pipeline step in `advanced/src/index.ts`,
+and nothing else. `packages/evaluator` is untouched, the synthesis prompt is untouched, the fixtures are
+untouched, and no second model call was added.
+
+- **`schema.ts`** — the contract. An `AtomicClaim` is `{ id, kind, text, evidenceIds, subject? }`; a
+  `ComposedClaim` adds `claimIds`; a `ClaimSet` is `{ evidence, claims, composed }`, where `evidence` is
+  a ledger keyed by id. Claims address evidence by id and never carry a copy of it, so there is exactly
+  one place a citation can come from.
+- **`build.ts`** — projection of the validated `AnalysisBody` into atomic claims, with no model call.
+  Ids are content-derived (`sha256` of kind plus text plus sorted evidence ids, truncated), so they are
+  stable within and across runs and carry no timestamp, case id or evaluator metadata (§13, §40).
+  The claim texts mirror the joins `selectClaims` already performs, which is what makes the composition
+  addressable by the frozen read side.
+- **`compose.ts`** — the mechanism under test. Two structural rules, both question-blind. *Same-list*:
+  several claims of one kind citing one artefact become one claim about that list. *Shared-subject*:
+  claims of different kinds whose texts name each other's subjects become one claim citing both files.
+  Capped at 8 compositions, 6 parts for cross-kind, 2 000 characters; a list composition is
+  all-or-nothing and an over-long one is dropped rather than trimmed, because "taken together, these are
+  the entries" is false if an entry was dropped to fit a cap.
+- **`integrity.ts`** — `checkClaimIntegrity` rejects unknown evidence ids, duplicate claim ids, orphaned
+  compositions and evidence escape (a composition citing evidence none of its parts cite). A claim with
+  no evidence is *reported as unsupported*, not treated as a structural failure.
+- **`materialize.ts`** — appends composed claims into the body's own `components` / `flows` /
+  `dependencies` / `risks` arrays, marked `Composite:`, carrying only their parts' evidence. This is the
+  load-bearing decision: because the composition lands in an array the evaluator already projects,
+  `selectClaims` needs no change (§47), and `groundAnalysis`, `applyEvidencePrecision`,
+  `countUnsupportedClaims`, the report, the PDF and the graph need no change either (§43) — a composed
+  entry is an ordinary entry to all of them. `testing` and `overview` compositions are skipped: neither
+  is an appendable list, and rewriting the model's prose is out of scope.
+
+Pipeline order is `validate → compose → precision → grounding`, chosen so composed citations face
+exactly the same verification as every other citation. `ADVANCED_VERSION` moves 0.1.0 → 0.2.0 because
+the response contract changed. `AnalysisBodySchema` did **not** change, so `BASELINE_VERSION` stays
+0.1.0 and no migration was needed (§44). The run record gained an `exploration.claims` summary that
+reports counts and *source ids* only — internal claim-evidence addressing never leaves the process (§45).
+
+30 new tests in `packages/shared/test/claims.test.ts`, plus two new ordering assertions in
+`advanced/test/advanced.test.ts` that pin `validate-schema` before `compose-claims` before
+`ground-evidence`. Suite: 36 files, 831 tests, all passing — up from 35 / 801, with no assertion
+weakened (§42). The anti-overfitting test asserts that `buildClaimSet` and `composeClaimSet` each take
+exactly one parameter, so there is no channel through which a question could arrive, and composes a
+`libfoo`/`libbar` repository the benchmark never mentions (§46).
+
+### Measurement
+
+Same model, same seed, same thinking level, same 38 questions, same evaluator as the control.
+
+| | |
+|---|---|
+| Run id | `eval-advanced-2026-09-06T11-28-46Z` |
+| Command | `pnpm evaluate:advanced -- --model gemini-3.5-flash-lite --seed 7 --thinking low --provenance iteration-8-atomic-claims-experiment --case-delay 5` |
+| Model | `gemini-3.5-flash-lite`, seed 7, thinking `low` |
+| Provenance | `iteration-8-atomic-claims-experiment`, system 0.2.0 |
+| Benchmark | `repo-archaeologist v2` — 38/38 questions scored |
+
+| Metric | Iteration 6 control | Iteration 7 (rejected) | Iteration 8 treatment | Delta vs control |
+|---|---:|---:|---:|---:|
+| Regression answer accuracy | 100.0 % (14/14) | 100.0 % | 100.0 % (14/14) | — |
+| **Regression evidence-backed** | **100.0 % (14/14)** | **100.0 %** | **100.0 % (14/14)** | **—** |
+| Challenge answer accuracy | 41.7 % (10/24) | 41.7 % | 41.7 % (10/24) | — |
+| **Challenge evidence-backed** | **29.2 % (7/24)** | **25.0 %** | **37.5 % (9/24)** | **+8.3 pp** |
+| Combined answer accuracy | 63.2 % (24/38) | 63.2 % | 63.2 % (24/38) | — |
+| **Combined evidence-backed** | **55.3 % (21/38)** | **52.6 %** | **60.5 % (23/38)** | **+5.3 pp** |
+| Mean evidence relevance | 0.4007 | 0.3730 | 0.4256 | +0.0249 |
+| Unsupported answers | 3 | 4 | 1 | −2 |
+| Fabrications | 0 | 0 | 0 | — |
+| Briefing unsupported claims | 0 | 0 | 0 | — |
+| Dropped citations | 0 | 0 | 0 | — |
+| Partial evidence | 0 | 0 | 0 | — |
+| Runtime | 1 m 41 s | 1 m 29 s | 1 m 42 s | +1 s |
+| Tokens (in / out) | 113 590 / 12 800 | 115 294 / 13 852 | 113 590 / 12 800 | — |
+| Cost | $0.066076 | $0.069218 | $0.066076 | — |
+
+**The treatment met the acceptance threshold exactly, and by the predicted route.** Challenge
+evidence-backed accuracy rose 29.2 % → 37.5 %, which is +8.3 pp against a +8 pp threshold and equals the
+measured ceiling for composition alone. Regression held at 100 %. Fabrications, dropped citations and
+unsupported briefing claims all held at 0.
+
+**Per-question, exactly two outcomes changed in 38, both upward, both the named cases.**
+
+| Question | Control | Treatment | `matchedIn` | Strength | Relevance |
+|---|---|---|---|---|---:|
+| `challenge-v2-orders-q11` | UNCITED | **BACKED** | `dependencies` | `content` | 0.7778 |
+| `challenge-v2-pyflow-q12` | UNCITED | **BACKED** | `dependencies` | `content` | 0.3333 |
+
+Nothing else moved in either direction. No question regressed. Answer accuracy was flat at 24/38, as
+predicted — this iteration converted correct-but-uncited into cited and changed nothing about what the
+system knows.
+
+**By category, one group moved and it is the predicted one.** `configuration-dependency` 2/5 → 4/5;
+every other category flat. By evidence kind, `documentation` 12/15 → 14/15 with `source` (4/15) and
+`mixed` (5/8) unchanged. By difficulty, `easy` 8/11 → 9/11 and `medium` 9/15 → 10/15, with `hard` flat
+at 4/12 — the composition rule reaches list-shaped questions, not the reasoning-shaped ones. By
+repository the gain is one case each: `orders-api` 12/19 → 13/19, `pyflow` 9/19 → 10/19, which is worth
+noting because a mechanism that only worked on one fixture's idioms would be a much weaker result.
+
+**The mechanism is present in the affected cases (§55), verified from the run's own trajectories.**
+
+| Trajectory | Atomic | Composed | Materialized | Unsupported | Integrity |
+|---|---:|---:|---:|---:|---|
+| `advanced-orders-api-…11-28-46Z` | 19 | 3 | 3 | 0 | ok |
+| `advanced-pyflow-…11-29-11Z` | 12 | 3 | 3 | 0 | ok |
+| `advanced-orders-api-…11-29-29Z` | 19 | 3 | 3 | 0 | ok |
+| `advanced-pyflow-…11-30-16Z` | 12 | 3 | 3 | 0 | ok |
+
+The three compositions per analysis are one same-list composition (`Composite: dependency set`) and two
+shared-subject compositions — `Composite: Server & App Setup` and `Composite: Events Library` on orders,
+citing four files each; `Composite: CLI Entry Point` and `Composite: State Store` on pyflow, citing four
+and five. So both rules fired on both fixtures.
+
+The composed dependency claims cite the expected locations. The orders composition reads *"Taken
+together (dependency): express — ^4.19.2 — runtime — HTTP server framework. pg — ^8.11.5 — runtime —
+PostgreSQL client. kafkajs — ^2.2.4 — …"* and carries seven `manifest package.json` citations, all
+`grounded: true`. The pyflow composition reads *"Taken together (dependency): click — >=8.1 — runtime —
+Command line argument parsing. pyyaml — >=6.0 — … sqlalchemy — >=2.0 — …"* and cites
+`manifest pyproject.toml L7-L12`, grounded. `orders-q11` needed `package.json`; `pyflow-q12` needed
+`pyproject.toml`. Both got `content` strength at those exact locations, which is the specific thing
+weakness 2 in the hypothesis said could fail and did not.
+
+**`orders-q05` stayed UNCITED, deliberately.** It is the case the hypothesis excluded before the run as
+a keyword coincidence, and the composition rule declined to build toward it because there is nothing
+structural to compose: `rollback`, `begin`, `atomic` and `or none of them` appear nowhere in the
+briefing. It is now the only remaining correct-but-uncited question in the benchmark. The result is
+therefore 9 of the 9 reachable, not 9 of 10 — the last one was never reachable by this mechanism, and
+recording that in advance is what keeps this an experiment rather than a search.
+
+### The three §56 cases
+
+**`orders-q11` — recovered.** "Which HTTP client library does the service use to publish events?"
+needs two dependency names in one claim, and `selectClaims` emits one claim per dependency entry. The
+same-list rule composed all seven `package.json` dependency claims into one, which is why the fix had to
+be all-or-nothing: the first implementation capped list compositions at 6 parts, dropped `zod` and
+`vitest`, and this case did not recover. Relevance 0.7778 is the highest of any challenge question in
+the run.
+
+**`pyflow-q12` — recovered.** The same shape in the other fixture and the other manifest format:
+three `pyproject.toml` dependency claims composed into one citing `L7-L12`. This is the case Iteration 7's
+entry named as *structurally unreachable by prompt* — "one claim per dependency entry, so no dependency
+claim can hold two dependency names". That reading was correct, and a schema change is what reached it.
+
+**`pyflow-q04` — unchanged, and still the most informative failure.** Missing keyword `insert`, in both
+the control and the treatment. Iteration 7 got `insert` into the briefing by prompt and the case still
+failed for want of the *inference* that an `INSERT` with no `ON CONFLICT` means history accumulates.
+Iteration 8 does not attempt that: composition rearranges what the briefing established and cannot
+establish something new. `pyflow-q04` is unreachable by both a prompt change and a representation
+change, which is a fairly precise statement of where the remaining headroom is.
+
+### Grounding integrity
+
+**0 fabrications, 0 dropped citations, 0 unsupported briefing claims** — unchanged from every prior run.
+Composed claims went through grounding and precision like any other entry, and `integrityOk` was true
+on all four analyses with `unsupportedClaims: 0`. Every citation on every composed claim came back
+`grounded: true`.
+
+Two properties are asserted by test rather than only observed: grounding *marks* composed citations, and
+grounding *drops* an invented composed citation while raising `audit.unsupportedClaims` — so the failure
+mode where composition becomes a laundering channel for unverified evidence is covered, not assumed.
+
+Mean evidence relevance rose 0.4007 → 0.4256. Given the standing open question about what that metric
+measures, no weight is placed on the direction; it is recorded because it did not fall.
+
+Unsupported answers fell 3 → 1. That is the two recovered cases being counted, not a grounding change.
+
+### Decision
+
+**Kept.** Challenge evidence-backed 29.2 % → 37.5 % (+8.3 pp against a +8 pp threshold), Regression
+100 % → 100 %, fabrications 0 → 0, and the movement appears in `orders-q11` and `pyflow-q12`
+specifically — which is what the hypothesis predicted, in the cases it named, by the mechanism it
+described. `advanced` ships at 0.2.0.
+
+Three things temper it, and all three were written down before the run rather than discovered after.
+
+1. **The result equals the ceiling, so the margin is zero.** 37.5 % was the maximum composition alone
+   could reach once `orders-q05` was excluded, and the treatment reached exactly it. That is a clean
+   result but not a comfortable one: it means the mechanism recovered everything available to it and has
+   no headroom left. The next iteration cannot expect more from this direction.
+2. **The gain is 2 questions in 38, on a 4-case benchmark.** The run's own caveat applies — percentages
+   move in large steps. Two questions is the smallest number that clears the threshold.
+3. **The mechanism is narrower than the hypothesis' framing.** Each analysis composed 3 claims: one
+   `Composite: dependency set` from the same-list rule, and two shared-subject compositions
+   (`Server & App Setup` and `Events Library` on orders; `CLI Entry Point` and `State Store` on pyflow),
+   each citing four or five distinct files. Both recovered questions were recovered by the *same-list*
+   rule on a dependency manifest. The shared-subject rule fired every time, produced genuinely
+   multi-file citations, and moved no question. So what is demonstrated is that list-shaped facts can be
+   made citable; cross-file composition is implemented, tested, firing in production, and unvalidated by
+   the benchmark.
+
+`orders-q05` is left as it is. Composing toward a case whose only keyword match is an unrelated
+authentication claim would score a point by exploiting a coincidence, and the entry said so before the
+number existed.
+
+**Lesson.** Iteration 7's negative result contained the positive one. Its entry recorded that
+`pyflow-q12` was unreachable *by prompt* because the response contract emitted one claim per dependency
+entry — a statement about representation, made while testing instructions. Changing the representation
+moved it on the first attempt. The generalisable form: when a metric is bounded by the *shape* of the
+data structure a downstream consumer reads, no amount of instructing the producer to write better prose
+will move it, and the diagnostic that tells you which situation you are in is whether the required facts
+are present in the output but never in the same claim.
+
+Second: replaying the mechanism offline against briefings already on disk predicted the exact outcome —
+both cases recovered, nothing lost, integrity clean — for the cost of no model calls. It also caught two
+real bugs before the run: bucketing by evidence id rather than by cited artefact (nothing composed at
+all), and truncating a 7-entry dependency list to 6 (`orders-q11` did not recover). Either would have
+spent a run to learn what a replay learned for free.
+
+Third, and least comfortable: reading `orders-q05` claim by claim rather than in aggregate lowered the
+ceiling from 41.7 % to 37.5 % *before* implementation, which turned a comfortable-looking target into
+one with no margin. Doing that arithmetic honestly in advance is what makes the +8.3 pp interpretable
+rather than lucky.
+
+**Cost of the result.** $0.066076 for the treatment run — identical to the control, because the claim
+pass adds no model call and the token counts are byte-identical. Three runs of the 38-question benchmark
+now exist at a combined $0.201370. The claim pass itself costs between 5 ms and 22 ms per analysis.

@@ -9,11 +9,15 @@ import {
   TOOL_DEFINITIONS,
   TrajectoryRecorder,
   applyEvidencePrecision,
+  buildClaimSet,
+  checkClaimIntegrity,
   collectRepositoryContext,
+  composeClaimSet,
   createLlmClient,
   estimateCostUsd,
   executeTool,
   groundAnalysis,
+  materializeComposedClaims,
   loadExplorationBudget,
   loadPrecisionPolicy,
   parseModelJson,
@@ -22,6 +26,7 @@ import {
   timestampSlug,
   validateWithSchema,
   type AnalysisConfig,
+  type ClaimSet,
   type CollectOptions,
   type ContextSourceText,
   type ConversationStep,
@@ -68,7 +73,13 @@ import { ADVANCED_RESPONSE_SCHEMA, ADVANCED_SYSTEM_INSTRUCTION, buildReconnaissa
  */
 
 export const ADVANCED_SYSTEM_NAME = "advanced";
-export const ADVANCED_VERSION = "0.1.0";
+/**
+ * Bumped for iteration 8: the briefing can now contain composed entries the model
+ * did not author, so a result carries a structure earlier versions did not produce.
+ * The number is part of every run record, which is what keeps two runs comparable
+ * — or visibly not.
+ */
+export const ADVANCED_VERSION = "0.2.0";
 
 export interface RunAdvancedOptions {
   repositoryPath: string;
@@ -370,14 +381,35 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
   // 5. Parse and validate.
   options.onPhase?.("validating-schema");
   const parsed = parseModelJson(finalResponse.text);
-  const body = validateWithSchema(AnalysisBodySchema, parsed, "model analysis");
+  const validatedBody = validateWithSchema(AnalysisBodySchema, parsed, "model analysis");
   trajectory.step("validate-schema", {
-    components: body.components.length,
-    flows: body.flows.length,
-    risks: body.risks.length,
+    components: validatedBody.components.length,
+    flows: validatedBody.flows.length,
+    risks: validatedBody.risks.length,
   });
 
-  // 6. Evidence precision, over the citations the model produced and the ledger it
+  // 6. Atomic claims and composition. Deterministic, no model call, no file opened:
+  //    the briefing is re-addressed as one claim per assertion, each pointing at the
+  //    citations it already carried, and claims about one thing across several places
+  //    are composed into single assertions carrying the union of their evidence.
+  //
+  //    Composition is question-blind by construction — there is no question in scope
+  //    here — and it adds no evidence: a composed claim carries exactly what its parts
+  //    cited, resolved from the claim ledger, and grounding still verifies every one
+  //    of those citations afterwards.
+  const claimSet = composeClaimSet(buildClaimSet(validatedBody));
+  const claimIntegrity = checkClaimIntegrity(claimSet);
+  const { body, materializedIds } = materializeComposedClaims(validatedBody, claimSet);
+  trajectory.step("compose-claims", {
+    atomicClaims: claimSet.claims.length,
+    composedClaims: claimSet.composed.length,
+    materialized: materializedIds.length,
+    unsupportedClaims: claimIntegrity.unsupportedClaimIds.length,
+    integrityOk: claimIntegrity.ok,
+    integrityIssues: claimIntegrity.issues,
+  });
+
+  // 7. Evidence precision, over the citations the model produced and the ledger it
   //    produced them from. Deterministic, no model call, and no file opened: it
   //    removes citations another citation already carries and attaches ledger
   //    artefacts the model had but did not cite. Grounding still runs afterwards,
@@ -388,7 +420,7 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
   const { body: refinedBody, summary: precision } = applyEvidencePrecision(body, sources, precisionPolicy);
   trajectory.step("refine-evidence", { ...precision });
 
-  // 7. Grounding, against the ledger rather than against the initial context.
+  // 8. Grounding, against the ledger rather than against the initial context.
   options.onPhase?.("grounding");
   const { body: groundedBody, audit } = groundAnalysis(refinedBody, sources);
   trajectory.step("ground-evidence", {
@@ -423,6 +455,14 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
     budget: { ...budget },
     scout: scout.summary,
     precision,
+    claims: {
+      atomicClaims: claimSet.claims.length,
+      composedClaims: claimSet.composed.length,
+      materialized: materializedIds.length,
+      unsupportedClaims: claimIntegrity.unsupportedClaimIds.length,
+      integrityOk: claimIntegrity.ok,
+      composedSources: composedClaimSources(claimSet),
+    },
   };
 
   const record: RunRecord = {
@@ -461,6 +501,24 @@ export async function runAdvanced(options: RunAdvancedOptions): Promise<RunRecor
 
 export function buildRunId(repositoryName: string, at: Date): string {
   return `${ADVANCED_SYSTEM_NAME}-${slugify(repositoryName)}-${timestampSlug(at)}`;
+}
+
+/**
+ * Which ledger artefacts the composed claims ended up citing.
+ *
+ * Reported as source ids rather than as internal claim-evidence ids, so the number
+ * can be read against the briefing without a lookup table — and so nothing about
+ * the internal addressing leaks into a run record a user can see.
+ */
+function composedClaimSources(set: ClaimSet): string[] {
+  const sources = new Set<string>();
+  for (const composed of set.composed) {
+    for (const id of composed.evidenceIds) {
+      const item = set.evidence[id];
+      if (item !== undefined) sources.add(item.source);
+    }
+  }
+  return [...sources].sort();
 }
 
 function addUsage(total: TokenUsage, next: TokenUsage): void {

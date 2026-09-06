@@ -5,10 +5,105 @@ All notable changes to Repo Archaeologist. Format loosely follows
 
 ## [Unreleased]
 
-**The dashboard, looked at in a real browser for the first time.**
+### Added — atomic claims and evidence composition, and Iteration 8 kept it
 
-No measured behaviour changed: no prompt, no tool, no scorer, no benchmark. Every number in
-`0.7.0` still stands, and nothing here was re-measured because nothing here is on the measured
+Iteration 7's rejected entry contained the next hypothesis. It recorded that three challenge failures
+were out of reach of *any* prompt because `selectClaims` emits one claim per array entry, so no
+dependency claim can hold two dependency names. That is a statement about representation, made while
+testing instructions. Iteration 8 changed the representation and left the prompt alone.
+
+**`packages/shared/src/claims/` — five modules, no model call.** The advanced pipeline gains one
+deterministic step between schema validation and the precision pass:
+
+- `schema.ts` — an `AtomicClaim` is `{ id, kind, text, evidenceIds, subject? }`, a `ComposedClaim` adds
+  `claimIds`, a `ClaimSet` is `{ evidence, claims, composed }`. Claims address evidence **by id** into
+  the set's own ledger and never carry a copy, so a claim cannot acquire evidence its parts did not have.
+- `build.ts` — projects the validated body into atomic claims whose texts mirror the joins the evaluator
+  already performs. Ids are `sha256` over kind, text and sorted evidence ids: content-derived, stable,
+  with no timestamp, case id or evaluator metadata in them.
+- `compose.ts` — the mechanism. *Same-list*: claims of one kind citing one artefact become one claim
+  about that list. *Shared-subject*: claims of different kinds whose texts name each other's subjects
+  become one claim citing both files. Capped at 8 compositions, 6 parts cross-kind, 2 000 characters; a
+  list composition is all-or-nothing and an over-long one is dropped rather than trimmed, because "taken
+  together, these are the entries" is false if an entry was dropped to fit a cap.
+- `integrity.ts` — rejects unknown evidence ids, duplicate claim ids, orphaned compositions and evidence
+  escape. A claim with no evidence is reported as unsupported, not treated as a structural failure.
+- `materialize.ts` — appends compositions into the body's own `components` / `flows` / `dependencies` /
+  `risks` arrays, marked `Composite:`, carrying only their parts' evidence.
+
+**That last choice is the load-bearing one.** Because a composition lands in a list the rest of the
+system already walks, grounding, precision, the audit, the report, the PDF, the graph and the frozen
+evaluator all needed no change — a composed entry is an ordinary entry to every one of them, and in
+particular it faces exactly the same citation verification as everything else. `packages/evaluator` is
+untouched, the synthesis prompt is byte-identical to Iteration 7's reverted control, the fixtures are
+untouched, and no second model call was added.
+
+The claim pass cannot see a question. `buildClaimSet` and `composeClaimSet` each take one parameter and
+a test asserts their arity, so no channel for one can be added quietly. `meta.exploration.claims`
+reports counts and cited **source ids** only; internal claim-evidence addressing never leaves the
+process.
+
+`ADVANCED_VERSION` 0.1.0 → **0.2.0**, because the response contract changed. `AnalysisBodySchema` did
+not change, so `BASELINE_VERSION` stays 0.1.0 and no migration was needed.
+
+### Measured — Iteration 8's composition experiment, and kept it
+
+**The acceptance threshold was +8 pp on Challenge evidence-backed accuracy. The result was +8.3 pp.**
+
+| | Control | Treatment |
+| --- | --- | --- |
+| Run id | `eval-advanced-2026-09-05T01-35-25Z` | `eval-advanced-2026-09-06T11-28-46Z` |
+| Provenance | `iteration-6-baseline` | `iteration-8-atomic-claims-experiment` |
+| System version | 0.1.0 | 0.2.0 |
+| Challenge evidence-backed | 29.2 % (7/24) | **37.5 % (9/24)** |
+| Challenge answer accuracy | 41.7 % (10/24) | 41.7 % (10/24) |
+| Regression (frozen, 14) | 100.0 % / 100.0 % | 100.0 % / 100.0 % |
+| Combined evidence-backed | 55.3 % (21/38) | **60.5 % (23/38)** |
+| Fabrications / dropped citations | 0 / 0 | 0 / 0 |
+| Briefing unsupported claims | 0 | 0 |
+| Unsupported answers | 3 | 1 |
+| Mean evidence relevance | 0.4007 | 0.4256 |
+| Runtime / cost | 1m41s / $0.066076 | 1m42s / $0.066076 |
+
+**Exactly two questions of 38 changed outcome, both upward, both named in advance.**
+`challenge-v2-orders-q11` and `challenge-v2-pyflow-q12` each went UNCITED → BACKED with
+`matchedIn = dependencies` and `content` evidence strength, citing `package.json` and
+`pyproject.toml L7-L12` respectively — the exact expected locations. Nothing regressed. Of the
+groupings only `configuration-dependency` moved (2/5 → 4/5), with `documentation` evidence 12/15 → 14/15
+and `hard` questions flat at 4/12. Cost is byte-identical to the control because the claim pass adds no
+model call; it runs in 5–22 ms per analysis.
+
+**The mechanism is present in the affected cases, not just the aggregate.** All four run trajectories
+report `integrityOk: true` and `unsupportedClaims: 0`, with 19 atomic / 3 composed / 3 materialized on
+orders and 12 / 3 / 3 on pyflow. Every citation on every composed claim came back `grounded: true`.
+
+**The result equals its own measured ceiling, which is the honest reading.** Before implementing, the 17
+challenge failures were re-classified by asking of each not "did one claim satisfy this" but "do the
+required keywords appear anywhere in the briefing at all". Fourteen fail that second test — no
+arrangement of claims can recover them. Of the three that pass it, `orders-q05` was excluded as a
+keyword coincidence: its only satisfied alternative is the bare word `all`, in an unrelated
+authentication claim, while `rollback`, `begin` and `atomic` appear nowhere in the briefing. That put the
+ceiling at 9 of 24 — the threshold exactly — and the treatment reached precisely it, with no margin left.
+`orders-q05` is now the benchmark's one remaining correct-but-uncited question, and it is left alone
+deliberately: composing toward it would score a point by exploiting an accident.
+
+Also narrower than the framing: both recovered cases came from the same-list rule over a dependency
+manifest. The shared-subject rule fires on every analysis and produces compositions citing four or five
+distinct files each — and moved no question. Cross-file composition is implemented, tested, live, and
+unvalidated by this benchmark.
+
+**Tests.** 30 new in `packages/shared/test/claims.test.ts` covering creation, multi-evidence claims,
+determinism, both composition rules, all four integrity failures, materialization, and two properties
+that matter most: grounding *marks* composed citations, and grounding *drops* an invented one while
+raising `audit.unsupportedClaims` — so composition cannot become a laundering channel for unverified
+evidence. Two new ordering assertions in `advanced/test/advanced.test.ts` pin `validate-schema` before
+`compose-claims` before `ground-evidence`. Suite 35 files / 801 tests → **36 / 831**, with no assertion
+weakened. `pnpm verify:measured --ref HEAD` reports all nine frozen files unchanged.
+
+### The dashboard, looked at in a real browser for the first time
+
+No measured behaviour changed in the entries below: no prompt, no tool, no scorer, no benchmark. Every
+number in `0.7.0` still stands, and nothing here was re-measured because nothing here is on the measured
 path. What changed is the product layer, and the reason it could change is that the layout was
 finally *observed* rather than asserted — headless Chrome over the DevTools protocol, driving
 the shipped page against the real server.
