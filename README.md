@@ -7,7 +7,7 @@ know what it does, how it is put together, where the sharp edges are, and which 
 read first. Repo Archaeologist produces that briefing — and cites its sources, so you can
 check it instead of trusting it.
 
-> **Status: four measured iterations, one of them rejected. Iterations 4 and 5 are the product layer.**
+> **Status: six measured iterations, two of them rejected. Iterations 4 and 5 are the product layer.**
 > Iteration 1 — letting the model search and read files — **scored 7.1 points worse than the
 > baseline** and was rejected. Iteration 2 — making the search deterministic and running it
 > *before* the model gets a turn — **scored 21.4 points better**, 85.7 % against the baseline's
@@ -22,7 +22,12 @@ check it instead of trusting it.
 > **measurement only**: 100 % had left the benchmark unable to say anything, so it added 24 harder
 > questions beside the frozen 14 and measured the unchanged system — **100.0 % on the frozen set,
 > 29.2 % on the new one** — then declined to change the analysis, because the failure it found
-> names a lever the iteration was not allowed to pull. See
+> names a lever the iteration was not allowed to pull. Iteration 7 pulled it, as a synthesis-prompt
+> change, and **was rejected: −4.2 points**, reverted, and not part of the shipped system.
+> Iteration 8 changed the *representation* instead — atomic claims that can be composed — and
+> **was kept: 29.2 % → 37.5 % on the challenge set** against a +8 pp threshold, with the frozen set
+> still at 100 % and no question lost. That is the current system: advanced **0.2.0**, baseline
+> **0.1.0**. See
 > [`docs/improvement-changelog.md`](docs/improvement-changelog.md) for every number and the
 > diagnosis behind each.
 
@@ -66,7 +71,10 @@ pnpm install          # install dependencies
 pnpm setup            # build the two local git fixtures used by the evaluation cases
 ```
 
-There is no build step. `tsx` runs the TypeScript directly.
+There is no build step and no compiled artefact — `tsx` runs the TypeScript directly, so `pnpm build`
+does not exist and reports `Command "build" not found` if you try it. That is expected, not a broken
+setup: [`pnpm typecheck`](#test) is the static gate and `pnpm smoke` is the executable one. See
+[`docs/operations.md`](docs/operations.md#verifying-a-release).
 
 For real model calls, copy the example environment file and add a key:
 
@@ -133,8 +141,9 @@ and one field cannot be asked to remember both.
 ## Test
 
 ```sh
-pnpm test         # 778 tests
+pnpm test         # 837 tests
 pnpm typecheck    # tsc --noEmit, strict
+pnpm smoke        # the shipped server, end to end, over a real socket
 ```
 
 The whole suite runs offline with the model stubbed: no API key, no network, no cost.
@@ -168,10 +177,26 @@ That distinction is not a caveat, it is a defect this project shipped. The first
 headless Chrome was pointed at the dashboard, the evidence drawer was painting over half the
 workspace from boot — `.drawer { display: flex }` outranks the user-agent `[hidden]` rule, and
 jsdom resolves `hidden` ahead of the cascade, so both suites reported a drawer that opened and
-closed correctly while a browser showed one that never shut. Fixed in `Unreleased`, along with the
+closed correctly while a browser showed one that never shut. Fixed in `0.8.0`, along with the
 `render()` call that issued an un-awaited HTTP `GET` on every repaint. **There is still no
 checked-in browser gate**, and the layout facts in this repository are asserted as stylesheet text
-rather than measured; see item 7 of [`CHANGELOG.md`](CHANGELOG.md#next) for what one would cover.
+rather than measured; see
+[`docs/future-work.md`](docs/future-work.md#there-is-still-no-checked-in-browser-gate) for what one
+would cover.
+
+One more runs the whole release rather than a module:
+
+```sh
+pnpm smoke        # 50 checks over 15 steps
+```
+
+It starts the shipped entry point over a real socket against a real file database, runs an analysis,
+reads the report, graph and evidence, asks a question, exports the PDF, stops the process with
+`SIGTERM` and reads the record back **from a second process**, then deletes it and stops again —
+asserting exit 0 and no WAL left behind both times. It exists because it is the only check that can
+fail on the seams *between* the pieces: a store that does not survive a restart, a shutdown that
+corrupts a WAL, a route the browser needs that answers only in a test harness. Offline and free,
+like everything else here.
 
 ```sh
 pnpm verify:measured --ref <git-ref>                    # what changed under the measured path
@@ -339,6 +364,48 @@ been the intuitively-appealing, unmeasured change the whole method exists to pre
 hypothesis is written down in [`docs/improvement-changelog.md`](docs/improvement-changelog.md) for
 the iteration that acts on it.
 
+### Two iterations then spent that headroom — one rejected, one kept
+
+**Iteration 7 pulled the lever Iteration 6 identified, and it did not work.** Six form-level
+instructions appended to the synthesis prompt, asking the model to keep a fact and its identifier in
+the same sentence; model, seed, thinking level, tools, budgets, scout, grounding, schema, evaluator,
+benchmark and fixtures all held. Challenge evidence-backed accuracy went **29.2 % → 25.0 %** against
+a +8 pp threshold. Exactly one question of 38 changed outcome, and it went PASS → UNCITED. **Rejected
+and reverted**: the prompt is byte-identical to its pre-experiment state, `ADVANCED_VERSION` stayed at
+0.1.0 because no behaviour shipped, and it is not part of the system this repository releases. What
+the negative result teaches is that *"the expected evidence was in context"* is a much weaker claim
+than *"the model had established the fact"* — and that a **question-blind** synthesis step cannot be
+instructed to organise itself around a question it never sees.
+
+**Iteration 8 changed the representation instead, and it worked.** The rejected entry contained the
+next hypothesis: three failures were out of reach of *any* prompt because `selectClaims` emits one
+claim per array entry, so no dependency claim could hold two dependency names. That is a statement
+about representation, discovered while testing instructions. So a deterministic claim pass — no model
+call, no second request, no prompt change — projects the validated briefing into **atomic claims** and
+composes them under two structural, question-blind rules:
+
+| | Control (Iteration 6) | Iteration 8 |
+| --- | --- | --- |
+| **Challenge evidence-backed** | 29.2 % (7/24) | **37.5 % (9/24)** |
+| Regression Set v1 (frozen, 14) | 100.0 % | 100.0 % |
+| Combined evidence-backed | 55.3 % (21/38) | **60.5 % (23/38)** |
+| Fabrications / dropped citations | 0 / 0 | 0 / 0 |
+| Cost | $0.066076 | $0.066076 |
+
+**Kept**: +8.3 pp against a +8 pp threshold, `ADVANCED_VERSION` 0.1.0 → **0.2.0**, baseline unchanged
+at **0.1.0**. Exactly two questions of 38 changed outcome, both upward, both named in advance, each
+citing the exact file the case expected. Nothing regressed. Cost is byte-identical because the claim
+pass adds no model call — it runs in 5–22 ms.
+
+Two things are reported rather than glossed. The result **equals its own pre-registered ceiling
+exactly**: 14 of the 17 failures do not contain the required keywords anywhere in the briefing, so no
+arrangement of claims can recover them, and the measured ceiling was 9 of 24 — which is what the
+treatment reached, with no margin. And of the two composition rules, only the same-list rule over a
+dependency manifest moved anything; the cross-file rule fires on every analysis, produces
+compositions citing four or five files each, and moved no question. It is implemented, tested, live,
+and unvalidated by this benchmark. Both are in
+[`docs/future-work.md`](docs/future-work.md#composition-has-no-headroom-left-so-the-rule-set-is-closed).
+
 ---
 
 ## The web application
@@ -465,15 +532,18 @@ packages/evaluator/    Case loading, matching, scoring, aggregation, reporting, 
 fixtures/              Generated git repositories used by the cases (pnpm setup)
 reports/               Briefings from both systems (JSON + Markdown)
 trajectories/          What each run did, step by step
-docs/                  Architecture, evaluation method, improvement changelog
-scripts/               Fixture builder, measured-path guard, and a structural check for the PDF writer
+docs/                  Architecture, evaluation method, improvement changelog, operations, future work
+scripts/               Fixture builder, measured-path guard, production smoke, and two by-hand diagnostics
 ```
 
 [`docs/architecture.md`](docs/architecture.md) explains why the boundaries fall where they
 do. [`docs/evaluation.md`](docs/evaluation.md) explains the metric in enough detail to
 argue with. [`docs/improvement-changelog.md`](docs/improvement-changelog.md) is the
 experiment log: one entry per iteration, hypothesis first, measurement after, never edited
-to match the outcome.
+to match the outcome. [`docs/operations.md`](docs/operations.md) is how to run this in
+production — requirements, configuration, database, health, shutdown, security posture.
+[`docs/future-work.md`](docs/future-work.md) is what is deliberately unsolved and what closing each
+one would take.
 
 ## Limitations
 

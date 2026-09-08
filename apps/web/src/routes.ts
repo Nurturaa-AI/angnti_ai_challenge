@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   ANALYSIS_SYSTEMS,
   AnalysisEventBus,
+  AnalysisNotFoundError,
   AnalysisRunner,
   DEFAULT_ANALYSIS_SYSTEM,
   DEFAULT_QUESTION_BUDGET,
@@ -24,6 +25,7 @@ import {
   IGNORED_DIRECTORIES,
   RequestError,
   createLlmClient,
+  redactSecrets,
   statOrNull,
   type AnalysisConfig,
   type ExplorationBudget,
@@ -171,16 +173,49 @@ export function createApi(dependencies: ApiDependencies): WebApi {
     return id;
   };
 
+  /** The one answer for an analysis this workspace does not hold, wherever that is noticed. */
+  const noSuchAnalysis = (id: string): RequestError =>
+    new RequestError(
+      `No analysis with id "${id}".`,
+      "It may have been deleted. The analysis list shows what this workspace still holds.",
+      { notFound: true },
+    );
+
   const requireAnalysis = async (id: string): Promise<AnalysisRecord> => {
     const record = await store.get(requireId(id));
-    if (record === undefined) {
-      throw new RequestError(
-        `No analysis with id "${id}".`,
-        "It may have been deleted. The analysis list shows what this workspace still holds.",
-        { notFound: true },
-      );
-    }
+    if (record === undefined) throw noSuchAnalysis(id);
     return record;
+  };
+
+  /**
+   * Answers 404 for work whose analysis is deleted while the work is in flight.
+   *
+   * `requireAnalysis` covers the case where the record is already gone when the
+   * request arrives. A question is different: it is answered *before* it is stored,
+   * and the model work in between takes tens of seconds. A user who deletes the
+   * analysis in that window has done something entirely ordinary, but the write that
+   * follows lands on no row.
+   *
+   * Untranslated, that surfaced as `500 No analysis an-x-1.` — the wrong status and
+   * the wrong story, since nothing failed except the row's continued existence. It
+   * reads that way because `AnalysisNotFoundError` reports its `name` as
+   * `StorageError` on purpose, so the runner's lifecycle checks and every existing
+   * `StorageError` handler keep working; `errorResponse` cannot tell the two apart
+   * and correctly refuses to guess.
+   *
+   * So the distinction is drawn here, at the boundary, where an HTTP status is the
+   * thing being decided — and only for the id this request named, so a store failure
+   * about some other analysis is still the internal error it is. Nothing below
+   * changes: the store throws what it threw, `runner.observeDeletion` observes it the
+   * same way, and cancellation is untouched.
+   */
+  const rejectIfDeleted = async <T>(id: string, work: Promise<T>): Promise<T> => {
+    try {
+      return await work;
+    } catch (error) {
+      if (error instanceof AnalysisNotFoundError && error.analysisId === id) throw noSuchAnalysis(id);
+      throw error;
+    }
   };
 
   /** A record that has a report and a graph, or an error explaining why not. */
@@ -306,7 +341,7 @@ export function createApi(dependencies: ApiDependencies): WebApi {
       });
 
       const answered = questionView(run.answered);
-      await store.appendQuestion(record.id, answered);
+      await rejectIfDeleted(record.id, store.appendQuestion(record.id, answered));
 
       // The question's own reads join the stored evidence, so the viewer can serve
       // the artefacts its citations name. They do not become citable by a later
@@ -314,9 +349,12 @@ export function createApi(dependencies: ApiDependencies): WebApi {
       // artefacts only, which is what keeps a conversation from becoming evidence.
       const merged = await store.get(record.id);
       if (merged !== undefined) {
-        await store.update(record.id, {
-          evidence: mergeQuestionEvidence(merged.evidence, run.newSources, answered),
-        });
+        await rejectIfDeleted(
+          record.id,
+          store.update(record.id, {
+            evidence: mergeQuestionEvidence(merged.evidence, run.newSources, answered),
+          }),
+        );
       }
 
       metrics.questionAnswered(
@@ -714,8 +752,28 @@ function notFound(request: ApiRequest): RequestError {
  * operator's log and the caller gets a sentence with nothing in it.
  */
 function errorResponse(error: unknown, logError?: ((message: string) => void) | undefined): ApiResponse {
+  /**
+   * One redaction, on the way out, covering every branch below.
+   *
+   * Most of these messages are ours and carry nothing. The exception is the text
+   * that originates upstream: `wrapModelError`'s last branch passes the provider
+   * SDK's own message through, and a provider is free to describe a failed request
+   * however it likes. `redactSecrets` already guards the two places a credential
+   * could otherwise surface — the trajectory files and the operator's log — and an
+   * HTTP body is the third. Doing it here rather than at each throw site means a
+   * branch added later cannot forget.
+   */
   const shape = (status: number, name: string, message: string, hint?: string | undefined): ApiResponse =>
-    jsonResponse({ error: { name, message, ...(hint === undefined ? {} : { hint }) } }, status);
+    jsonResponse(
+      {
+        error: {
+          name,
+          message: redactSecrets(message),
+          ...(hint === undefined ? {} : { hint: redactSecrets(hint) }),
+        },
+      },
+      status,
+    );
 
   if (error instanceof RequestError) {
     return shape(error.notFound ? 404 : 400, error.name, error.message, error.hint);
@@ -735,7 +793,11 @@ function errorResponse(error: unknown, logError?: ((message: string) => void) | 
   }
 
   const report = logError ?? ((message: string): void => console.error(message));
-  report(`unhandled API error: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
+  // The stack stays: this branch is the one an operator has to debug from, and it is
+  // the only place the detail exists. Redacted, because a log is a file too.
+  report(
+    redactSecrets(`unhandled API error: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`),
+  );
   return shape(500, "InternalError", "The request failed.");
 }
 

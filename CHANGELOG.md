@@ -3,7 +3,103 @@
 All notable changes to Repo Archaeologist. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.8.0] — 2026-09-08
+
+Two things ship in this release, and they are separate on purpose. **Iteration 8** is a measured
+analytical change that was kept: atomic claims and evidence composition, `ADVANCED_VERSION` 0.1.0 →
+0.2.0. **Production hardening** is everything after it, and it is not an iteration —
+it improves operational reliability, security, testing, documentation, and release readiness
+without changing the accepted Iteration 8 analytical behavior. No number below was re-measured by
+it, because nothing it touched is on the measured path.
+
+### Fixed — production hardening: four defects, found by auditing rather than by a failing test
+
+All four are in `apps/web` — two in transport, two in the stylesheet. None is in `advanced/`,
+`baseline/`, `evaluation/`, `packages/evaluator/` or `packages/shared/src/claims/`; each landed with
+a regression test that was watched to fail against the old code.
+
+- **A delete racing a question answered `500` where it should answer `404`.** `AnalysisNotFoundError`
+  reports its `name` as `StorageError` deliberately — that is what keeps the Iteration 5 runner's
+  lifecycle checks and every existing `StorageError` handler working — so an analysis deleted during
+  the tens of seconds `answerQuestion` runs surfaced from `store.appendQuestion` as an internal
+  error naming an id: `No analysis an-….` The store, `observeDeletion` and cancellation are
+  untouched. The distinction is drawn at the route, for the one id the request named, by
+  `rejectIfDeleted` — so a genuine storage failure is still a `500`, and the answer a client gets
+  for an analysis this workspace no longer holds is the same `404` it gets everywhere else.
+- **Upstream error text reached HTTP bodies and the operator log un-redacted.** `wrapModelError`'s
+  last branch forwards the provider SDK's own message, and a Gemini transport failure can carry the
+  request URL — key and all. `redactSecrets` already guarded trajectory files and reports; the
+  response body was the third exit and did not have it. It now runs inside the single `shape()`
+  helper every branch of `errorResponse` returns through, so a branch added later cannot forget, and
+  on the catch-all's stack log too, because a log is a file. The redaction is at the boundary rather
+  than in `llm.ts`: broader coverage, and provably outside the measured path.
+- **Below 860px the sidebar was `display: none`, and it is the only navigation the product has.**
+  `renderNav()` is the single place in `app.js` that emits a `href="#<section>"`, so a narrow
+  viewport could see Overview and nothing else — Architecture, Evidence, Questions and Export were
+  reachable only by typing a fragment into the address bar. The sidebar is now a horizontal strip of
+  tabs that scrolls sideways when it does not fit, and the two blocks that *are* reference material
+  rather than navigation (recent analyses, the persistence note) are what gets dropped instead. CSS
+  only: same markup, same `renderNav()`, same active class, same anchors.
+- **A focused link had no focus ring.** `a` was missing from the `:focus-visible` list, and the
+  section navigation is nine anchors — so a keyboard user tabbing the sidebar had only the user-agent
+  outline, which on this ground is close to invisible. `.skip-link` is an anchor too and gains it as
+  well, its own on-screen `:focus` rule still applying.
+
+Four gates in `wiring.test.ts` hold the two UI fixes as stylesheet text, which is the assertion
+jsdom can actually reach; the geometric version needs the browser gate that is still
+[future work](docs/future-work.md#there-is-still-no-checked-in-browser-gate).
+
+### Changed — production hardening: operational hygiene
+
+- **`.gitignore` names SQLite patterns.** `resolveDatabaseLocation` refuses a database inside the
+  workspace and the default lives at `~/.repo-archaeologist/analyses.db`, so the common case cannot
+  land one here — but `--db ./local.db` is accepted and its WAL and shared-memory sidecars would
+  appear beside it. Cheap insurance against the day someone does exactly that.
+- **`.env.example` documents all 20 `REPO_ARCHAEOLOGIST_*` variables**, up from 12, and states that
+  host and port are flags with no environment equivalent. Placeholders only; `GEMINI_API_KEY=` stays
+  empty.
+- **Shutdown reports a failed close.** The `SIGINT`/`SIGTERM` chain gained a `.catch` and a non-zero
+  exit status. Exiting 0 after failing to close a database is the shape of bug a supervisor reads as
+  "stopped cleanly" and restarts into a recovering WAL. The failure prints through `formatError`,
+  where redaction lives, rather than as an unhandled rejection with a stack trace on Ctrl-C.
+- **`pnpm smoke` — [`scripts/production-smoke.ts`](scripts/production-smoke.ts), 50 checks over 15
+  steps.** It starts the shipped entry point over a real socket against a real file database, runs an
+  analysis, reads the report, graph and evidence, asks a question, exports the PDF, stops the process
+  with `SIGTERM` and reads the record back **from a second process**, then deletes it and stops
+  again — asserting exit 0 and no `-wal`/`-shm` left behind both times. It covers the seams the unit
+  suite cannot: a store that does not survive a restart, a shutdown that corrupts a WAL, a route the
+  browser needs that answers only in a harness. Deterministic and free — `--mock` with
+  `GEMINI_API_KEY` blanked in the child, so a machine that happens to have a key cannot turn a smoke
+  test into a paid run.
+- **Documentation.** [`docs/operations.md`](docs/operations.md) for running this in production —
+  requirements, install, configuration, database, health, shutdown, and the security posture in one
+  place. [`docs/future-work.md`](docs/future-work.md) for the limitations that are deliberate,
+  each with what it would take to close. [`docs/production-hardening-audit.md`](docs/production-hardening-audit.md)
+  records the state the pass started from, so every diff in it can be justified against something
+  written down rather than against memory. The composition diagnostic is documented in
+  [`docs/architecture.md`](docs/architecture.md#the-composition-diagnostic-development-only) as the
+  development-only tool it is.
+
+**Audited and found already correct, so unchanged** — recorded because "we looked" is a different
+statement from "we changed it". Repository path containment against eight traversal shapes including
+a null byte and an absolute path to a directory outside the tree; a foreign `Host` refused `421` and
+a foreign `Origin` `403` with its own allowed; a 2 MiB body refused `413` unread; evidence ids
+scoped to the analysis that issued them — including the case where both analyses issued the same
+positional id, where each resolves to its own artefact; the analysed repository unmodified, verified
+by an mtime-and-length snapshot of every file before and after a full run; no database written inside
+the workspace; every Q&A citation naming an artefact the question actually inspected; no credential
+in any response body, on stdout or on stderr, with the banner reporting `api key: <unset>`;
+`execFileSync("git", …)` as the only child process, with a fixed binary, constant argument arrays, no
+`shell: true` and a 5 s timeout. The five Iteration 5 lifecycle APIs, the Q&A limits, and the
+export's read-only relationship to the store are all intact. No dead UI code was found: every
+candidate export in `public/ui.js` has an internal caller.
+
+Suite 36 files / 831 tests → **36 / 837**, with no assertion weakened and no test deleted.
+`pnpm verify:measured --ref HEAD` reports `OK` with all nine frozen files unchanged, `ADVANCED_VERSION`
+0.2.0 → 0.2.0 and `BASELINE_VERSION` 0.1.0 → 0.1.0. `pnpm smoke` passes 50 of 50 checks. The
+benchmark, the evaluator, the fixtures, the expected answers and evidence, the prompts and the model
+configuration are byte-identical to Iteration 8, and **no paid run was made and no benchmark report
+was generated** for this release.
 
 ### Added — atomic claims and evidence composition, and Iteration 8 kept it
 
@@ -1396,9 +1492,15 @@ nothing in this release claims the results are good.
 
 ## Next
 
+This is the per-iteration list, kept in the order the iterations found things.
+[`docs/future-work.md`](docs/future-work.md) is the organised version — the same items grouped by
+what it would take to close each, plus the ones the production pass found and deliberately did not
+fix.
+
 Iteration 6 closed items 1 and 3 and left item 1 below as the change with evidence behind it.
 **Iteration 7 made that change, measured it, and rejected it** — which closes the item as a
-question rather than as a success, and rewrites what comes next.
+question rather than as a success, and rewrites what comes next. **Iteration 8 then took the first
+of its two successors and kept it.**
 
 1. ~~**Test the synthesis-granularity hypothesis.**~~ **Done, and rejected.** Challenge
    evidence-backed accuracy went 29.2 % → 25.0 % against a +8 pp threshold; exactly one question of
@@ -1411,15 +1513,18 @@ question rather than as a success, and rewrites what comes next.
    The successor is therefore not another prompt edit, and Iteration 7's own constraints forbid
    stacking one. Two directions remain, and they are architectural rather than lexical:
 
-   - **Give claims somewhere to put a literal.** Three of the 17 failures are unreachable by any
-     prompt because `selectClaims` emits one claim per dependency entry, so a question needing two
-     dependency names in a single claim cannot be answered by better writing. That is a schema and
-     claim-selection question, and changing either changes what the evaluator consumes — so it needs
-     its own iteration and its own frozen-baseline argument.
+   - ~~**Give claims somewhere to put a literal.**~~ **Done by Iteration 8, and kept.** Three of the
+     17 failures were unreachable by any prompt because `selectClaims` emits one claim per dependency
+     entry, so a question needing two dependency names in a single claim could not be answered by
+     better writing. Composition gave the representation somewhere to put them: Challenge
+     evidence-backed 29.2 % → 37.5 % against a +8 pp threshold, two questions recovered, none lost,
+     `ADVANCED_VERSION` 0.1.0 → 0.2.0. It also equalled its own pre-registered ceiling exactly, so
+     this lever is spent — see item 12.
    - **Or accept that the briefing is not question-shaped, and measure the thing that is.** The
      product already has grounded Q&A downstream of the briefing. Whether *that* path answers the
      Challenge questions is a different measurement from whether the briefing happens to contain
-     them, and it has never been run.
+     them, and it has never been run. **This is now the open half**, and it is the one direction of
+     the two that was never architectural: the path already exists and has never been scored.
 
    Whichever is chosen: hypothesis first, one variable, and the Iteration 6 baseline stays where it
    is.
@@ -1482,7 +1587,7 @@ metric's:
    that exist — the class of defect that shipped in `0.6.0` — and it is **not** equivalent to a
    browser test.
 
-   **This is no longer a hypothetical, and the cost estimate was wrong.** `Unreleased` pointed a
+   **This is no longer a hypothetical, and the cost estimate was wrong.** `0.8.0` pointed a
    real headless Chrome at the page for the first time and found the drawer painting over half the
    workspace from boot — a defect that shipped in `0.6.0`, survived both suites written to catch
    exactly this, and was visible in the first screenshot. jsdom resolves `hidden` ahead of the
@@ -1514,16 +1619,44 @@ metric's:
    key this environment does not have. Worth doing once, deliberately, next time a paid run happens
    anyway.
 
-10. ~~**The delete confirmation focuses the destructive button.**~~ **Closed by `Unreleased`.**
+10. ~~**The delete confirmation focuses the destructive button.**~~ **Closed by `0.8.0`.**
     *Cancel* takes the focus and comes first in source order, so the tab order and the reading
     order agree with it. The condition this item set for itself — "changing focus behaviour without
     a test that renders the page is how `0.6.0` happened" — was met before the change: the page is
     rendered by `browser-smoke.test.ts`, which clicks the real Delete button and asserts
     `document.activeElement`, and the assertion was watched to fail against the old behaviour.
 
-11. **Nothing has re-measured since the benchmark gained headroom.** `0.7.0` built a dataset that
-    can disagree and then deliberately spent none of it; `Unreleased` changed only the product
-    layer, so there is still no measurement against the 38-question set except the unchanged
-    system's. Item 1 remains the one with evidence behind it, and it remains untouched — which is
-    the right order, and is also now two iterations of not doing the thing the instrument was
-    sharpened for.
+11. ~~**Nothing has re-measured since the benchmark gained headroom.**~~ **Closed by Iteration 8.**
+    `0.7.0` built a dataset that can disagree and then deliberately spent none of it; the
+    product-layer pass in `0.8.0` changed only the product layer. Iteration 8 is the first change
+    measured against the 38-question set: Challenge evidence-backed 29.2 % → 37.5 %, combined
+    55.3 % → 60.5 %, frozen set 100 % in both, decided against a threshold written down first. Two
+    iterations of not spending the instrument, and then it was spent the way it was built to be.
+
+12. **Iteration 8 equalled its own measured ceiling, so composition has no headroom left.** Before
+    implementing, the 17 challenge failures were re-classified by asking whether the required
+    keywords appear *anywhere* in the briefing: 14 fail that test and no arrangement of claims can
+    recover them, one was excluded as a keyword coincidence, and the remaining 9 of 24 was the
+    ceiling. The treatment reached exactly 9. Adding composition rules to chase the other 14 would be
+    fitting the mechanism to the questions, which is the thing this project exists not to do — so
+    the composition rule set is treated as closed, and the next lever is a different one.
+
+    The one loose end is honest rather than actionable: both recovered cases came from the same-list
+    rule over a dependency manifest. The **shared-subject** rule fires on every analysis, produces
+    compositions citing four or five distinct files each, and moved no question. Cross-file
+    composition is implemented, tested, live, and unvalidated by this benchmark.
+
+13. **`pyflow-q04` is an inference gap, not a retrieval or representation one.** Iteration 7
+    recovered the literal `insert` the control dropped and the case still failed: it also needs one
+    of `append` / `history` / `every run` / `new row` / `accumulat`, none of which follows from
+    having the literal in a sentence. Iteration 8's composition does not reach it either, because
+    the missing step is establishing what the code *does* with the insert, not putting two facts
+    beside each other. It is the clearest single case for the "measure the Q&A path instead" half of
+    item 1, and it is deliberately not being fixed by adjusting the analysis to suit one question.
+
+14. **The benchmark stays at 38 cases.** Regression Set v1's 14 are frozen and byte-identical, which
+    is what keeps Iteration 3's number comparable; Challenge Set v2's 24 were written before any
+    system ran against them. Expanding it is legitimate future work — item 3's third fixture is the
+    shape it should take, adding *repositories* rather than more questions about the same two — but
+    it changes the denominator, so it belongs to an iteration that re-measures everything against
+    the new set and reports per set. It is not something to do while hardening a release.
