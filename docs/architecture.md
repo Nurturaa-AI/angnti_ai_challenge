@@ -389,6 +389,43 @@ neither is an appendable list, and rewriting the model's prose is not this step'
 `meta.exploration.claims` reports counts and cited **source ids** only. Internal claim-evidence
 addressing never leaves the process.
 
+### The composition diagnostic (development only)
+
+[`scripts/diagnose-claim-composition.ts`](../scripts/diagnose-claim-composition.ts) answers one
+question cheaply: *would composition have made these failures citable?* It reads a run trajectory
+that already exists on disk, replays the claim pass over that briefing, and re-scores the result with
+the unmodified evaluator, printing the claim counts, the integrity verdict, each composition with the
+sources it cites, and every question whose outcome changed.
+
+```sh
+pnpm exec tsx scripts/diagnose-claim-composition.ts \
+  trajectories/<run>.json evaluation/cases/<case>.json
+```
+
+It exists because the alternative was finding out by spending a paid benchmark run. Iteration 8's
+measured ceiling — 9 of 24, the acceptance threshold exactly — was established with it before a line
+of `claims/` was written, which is why the iteration could be committed to a threshold it might have
+missed.
+
+Four properties are what make it safe to keep:
+
+- **Offline and deterministic.** No model call, no network. Same inputs, same output, every time.
+- **It cannot reach the production request path.** No source file imports it; it is a script with an
+  `argv` interface, run by hand.
+- **It reads, and writes nothing.** Two `readFileSync` calls and `console.log`. It must not modify
+  benchmark data, and it holds no code that could: not the cases, not `benchmark.json`, not the
+  fixtures, not the trajectory it was pointed at.
+- **The questions enter after the claim pass, never before it.** The claim pass here sees exactly
+  what it sees in production — a briefing and a ledger. `scoreQuestion` runs afterwards, on the
+  before-and-after bodies, which is the only place a question belongs.
+
+It is a **diagnostic, not a measurement**: it answers whether a mechanism is capable of moving a
+case, and the number that counts still comes from the evaluation runner against live model output.
+One practical trap follows from that — point it at a **control** trajectory, one produced *before*
+the change. Against a trajectory whose briefing already contains the compositions, the pass is
+idempotent and it correctly reports `recovered=0 lost=0`, which reads like a null result and is not
+one.
+
 ### The exploration budget
 
 Ten bounds, each settable by flag or environment variable, defaults in

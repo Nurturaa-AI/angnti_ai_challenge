@@ -120,7 +120,7 @@ lifecycle contract.
 `styles.css` (1550). `pnpm vitest run apps/web` passes: 7 files, 168 tests, including
 `browser-smoke.test.ts` cases named "shares the row with the workspace rather than floating over
 it" and "fills the architecture workspace rather than showing an empty landing page" — the two
-§20 layout defects were fixed under `Unreleased` and are gated. jsdom has no layout engine, no
+§20 layout defects were fixed under `0.8.0` and are gated. jsdom has no layout engine, no
 CSS cascade and no paint, so those gates assert stylesheet *text*, not geometry; the remaining
 §20 work (responsive breakpoints, header and sidebar legibility, drawer width and scroll) is
 verification against the stylesheet and the shipped markup, not repair.

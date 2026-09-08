@@ -5,6 +5,7 @@ import {
   DEFAULT_EXPLORATION_BUDGET,
   DEFAULT_PRECISION_POLICY,
   ConfigError,
+  ModelError,
   createLlmClient,
   type AnalysisConfig,
   type ExplorationBudget,
@@ -566,6 +567,47 @@ describe("POST /api/questions", () => {
       expect(failure(await call(api, "POST", "/api/questions", body), 400).name).toBe("RequestError");
     }
   });
+
+  /**
+   * The window is real and not small: a question is answered before it is stored, and
+   * the model work in between takes tens of seconds against a live provider. Deleting
+   * the analysis in that window used to answer `500 No analysis an-x-1.` — the store's
+   * own sentence, at a status that says the server broke, for something a user did on
+   * purpose.
+   *
+   * Provoked by losing the row at the write rather than by racing two requests, so the
+   * assertion is about what the boundary does with that state and not about timing.
+   */
+  it("answers 404 rather than 500 when the analysis is deleted while its question is in flight", async () => {
+    const inner = new SqliteAnalysisStore({ location: MEMORY_DATABASE, now: fixedClock() });
+    stores.push(inner);
+    let deleteFirst = false;
+    const racing: AnalysisStore = {
+      create: (input) => inner.create(input),
+      get: (id) => inner.get(id),
+      list: (options) => inner.list(options),
+      update: (id, patch) => inner.update(id, patch),
+      delete: (id) => inner.delete(id),
+      getEvidenceSource: (analysisId, sourceId) => inner.getEvidenceSource(analysisId, sourceId),
+      close: () => inner.close(),
+      appendQuestion: async (analysisId, question) => {
+        if (deleteFirst) await inner.delete(analysisId);
+        await inner.appendQuestion(analysisId, question);
+      },
+    };
+
+    const target = newApiWith({ store: racing });
+    const created = ok<AnalysisView>(await call(target, "POST", "/api/analyze", { repository: "widget" }), 201);
+
+    deleteFirst = true;
+    const error = failure(
+      await call(target, "POST", "/api/questions", { analysisId: created.id, question: "What does the store do?" }),
+      404,
+    );
+    expect(error.name).toBe("RequestError");
+    expect(error.message).toBe(`No analysis with id "${created.id}".`);
+    expect(error.hint).toMatch(/may have been deleted/);
+  });
 });
 
 describe("GET /api/analysis/:id/export/pdf", () => {
@@ -627,6 +669,60 @@ describe("the rest of the surface", () => {
     const listed = ok<{ analyses: { id: string; questionCount: number }[] }>(await call(api, "GET", "/api/analyses"));
     expect(listed.analyses[0]?.id).toBe(analysis.id);
     expect(listed.analyses[0]?.questionCount).toBe(2);
+  });
+
+  /**
+   * `redactSecrets` guards the trajectory files and the operator's log. An HTTP body is
+   * the third place a credential could surface, and it was the one place nothing checked:
+   * `wrapModelError`'s last branch passes the provider SDK's own message through, and a
+   * provider is free to describe a failed request however it likes — including, one day,
+   * by quoting the request it sent.
+   *
+   * Provoked through the exporter because it is the injectable dependency closest to a
+   * route, and the branch under test is `errorResponse`'s, not the exporter's.
+   */
+  it("redacts a credential out of an upstream error, in the response and in the log", async () => {
+    const leaked = "AIzaSyC0000000000000000000000000000000000";
+    const logged: string[] = [];
+    const target = newApiWith({
+      logError: (message) => logged.push(message),
+      exporter: {
+        format: "pdf",
+        contentType: "application/pdf",
+        filename: () => "report.pdf",
+        export: () => {
+          throw new ModelError(`Gemini request failed for model "x": POST /v1?key=${leaked} returned 400`);
+        },
+      },
+    });
+    const created = ok<AnalysisView>(await call(target, "POST", "/api/analyze", { repository: "widget" }), 201);
+
+    const error = failure(await call(target, "GET", `/api/analysis/${created.id}/export/pdf`), 502);
+    expect(error.name).toBe("ModelError");
+    expect(error.message).not.toContain(leaked);
+    expect(error.message).toContain("<redacted-api-key>");
+    // A redacted message is still a usable one: the branch that was taken survives.
+    expect(error.message).toContain("returned 400");
+
+    // And the same for an error that reaches the catch-all, stack and all.
+    const exploding = newApiWith({
+      logError: (message) => logged.push(message),
+      exporter: {
+        format: "pdf",
+        contentType: "application/pdf",
+        filename: () => "report.pdf",
+        export: () => {
+          throw new Error(`boom GEMINI_API_KEY=${leaked}`);
+        },
+      },
+    });
+    const second = ok<AnalysisView>(await call(exploding, "POST", "/api/analyze", { repository: "widget" }), 201);
+    const generic = failure(await call(exploding, "GET", `/api/analysis/${second.id}/export/pdf`), 500);
+    expect(generic.message).toBe("The request failed.");
+
+    expect(logged.length).toBeGreaterThan(0);
+    for (const line of logged) expect(line).not.toContain(leaked);
+    expect(logged.join("\n")).toMatch(/<redacted(-api-key)?>/);
   });
 });
 
